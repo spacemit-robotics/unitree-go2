@@ -1,0 +1,9 @@
+# Edu-derived, symmetry-averaged reference angles for three-stage calibration.
+# Order: FR, FL, RR, RL; hip, thigh, calf. Angles are degrees.
+joint_order: [FR_hip, FR_thigh, FR_calf, FL_hip, FL_thigh, FL_calf,
+              RR_hip, RR_thigh, RR_calf, RL_hip, RL_thigh, RL_calf]
+joint_positions_deg:
+  [-43.30, 203.245, -160.615,
+    43.30, 203.245, -160.615,
+   -48.96, 263.135, -161.705,
+    48.96, 263.135, -161.705]

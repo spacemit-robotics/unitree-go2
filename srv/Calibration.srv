@@ -1,0 +1,8 @@
+string operation
+string mode
+string phase
+float32[12] joint_zero_offsets_rad
+float32[12] startup_reference_rotor_positions_rad
+---
+bool accepted
+string message

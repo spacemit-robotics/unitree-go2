@@ -1,0 +1,39 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>unitree_go2</name>
+  <version>0.1.0</version>
+  <description>Go2 locomotion with Linux CPU inference on K3.</description>
+  <maintainer email="spideman2@users.noreply.github.com">spideman2</maintainer>
+  <license>Apache-2.0</license>
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <build_depend>rosidl_default_generators</build_depend>
+  <exec_depend>rosidl_default_runtime</exec_depend>
+  <depend>rclcpp</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>ament_index_cpp</depend>
+  <depend>geometry_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>std_srvs</depend>
+  <depend>nlohmann_json</depend>
+  <depend>sensor_msgs</depend>
+  <depend>rl</depend>
+  <depend>yaml-cpp</depend>
+  <depend>motor</depend>
+  <depend>imu</depend>
+  <depend>rc_receiver</depend>
+  <depend>led</depend>
+  <exec_depend>launch_ros</exec_depend>
+  <exec_depend>ament_index_python</exec_depend>
+  <exec_depend>rosidl_runtime_py</exec_depend>
+  <exec_depend>python3-numpy</exec_depend>
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>python3-aiortc</exec_depend>
+  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>python3-dbus</exec_depend>
+  <exec_depend>network-manager</exec_depend>
+  <exec_depend>avahi-daemon</exec_depend>
+  <test_depend>python3-pytest</test_depend>
+  <member_of_group>rosidl_interface_packages</member_of_group>
+  <export><build_type>ament_cmake</build_type></export>
+  <exec_depend>python3-yaml</exec_depend>
+</package>
