@@ -1,0 +1,36 @@
+## Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+## SPDX-License-Identifier: Apache-2.0
+
+module: application/ros2/unitree-go2
+
+tests:
+  - name: go2-software-regression
+    description: >
+      Verifies Go2 control, ONNX policies, calibration, simulated motor transport,
+      SBUS events and web APIs without real hardware.
+    category: functional
+    scopes: [pr, scheduled]
+    timeout_s: 900
+    workdir: sdk
+    requires:
+      commands: [cmake, ctest, python3]
+      network: true
+      external_resources:
+        - https://archive.spacemit.com/spacemit-ai/model_zoo/rl/unitree-go2/
+    command: |
+      set -eo pipefail
+      source build/envsetup.sh
+      if [[ -n "${CI_BUILD_TARGET:-}" ]]; then
+          lunch "$CI_BUILD_TARGET"
+      fi
+      python3 "$SROBOTIS_TEST_MODULE/scripts/download_models_go2.py"
+      (
+          cd "$SROBOTIS_TEST_MODULE"
+          mm -j4 -DBUILD_TESTING=ON
+      )
+      # shellcheck disable=SC1090
+      source "$ROS_SETUP"
+      source output/staging/setup.bash
+      ctest --test-dir output/build/ros2/application/unitree_go2 \
+          --no-tests=error --output-on-failure -j4 \
+          --output-junit "$SROBOTIS_TEST_ARTIFACT_DIR/ctest.xml"

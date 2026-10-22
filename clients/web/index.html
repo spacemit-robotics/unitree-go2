@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+    <meta name="theme-color" content="#071116">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Go2 SDK 遥控</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/icon.svg">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app">
+      <section class="panel camera">
+        <div class="camera-heading">
+          <b>摄像头</b>
+          <button id="camera-toggle" type="button">打开摄像头</button>
+        </div>
+        <div class="camera-frame">
+          <span id="camera-placeholder">摄像头未打开</span>
+          <img id="camera-stream" alt="Tstc USB Full HD 摄像头画面" hidden>
+        </div>
+        <small id="camera-status">摄像头关闭</small>
+      </section>
+
+      <section class="joystick-panel left">
+        <div class="stickbox">
+          <div id="move-stick" class="joystick" role="slider" aria-label="前后和横移摇杆"><i class="knob"></i></div>
+          <div id="axes" class="axes">0.00 / 0.00</div>
+          <div>前后 / 横移</div>
+        </div>
+      </section>
+
+      <section class="joystick-panel right">
+        <div class="stickbox">
+          <div id="turn-stick" class="joystick yaw-stick" role="slider" aria-label="左右转向摇杆"><i class="knob"></i></div>
+          <div>左转 / 右转</div>
+        </div>
+      </section>
+
+      <header class="meta">
+        <div class="stop-actions">
+          <button class="action-button passive-top" type="button" data-mode="passive" title="有退出流程的模式先退出，再蹲下并进入被动">正常休眠</button>
+          <button class="action-button danger passive-top" type="button" data-mode="passive_direct" title="不等待动作退出，直接蹲下并进入被动">紧急制动</button>
+        </div>
+        <div class="robot-meta">
+          <button id="robots-button" class="robot-picker" type="button">选择机器狗 ▾</button>
+          <button id="connection" class="connection offline" type="button"><span></span><b>未连接</b></button>
+        </div>
+      </header>
+
+      <nav class="panel fixed" aria-label="固定控制">
+        <button class="action-button" type="button" data-mode="stand">站立</button>
+        <button class="action-button" type="button" data-mode="crouch">蹲下</button>
+        <button class="action-button" type="button" data-mode="rollover">翻身</button>
+        <button id="light-toggle" type="button" aria-pressed="false">打开白灯</button>
+        <button id="fpv-toggle" type="button" disabled aria-pressed="false" title="正在读取图传状态">打开图传</button>
+        <button class="page-button selected" type="button" data-page="0">1</button>
+        <button class="page-button" type="button" data-page="1">2</button>
+        <button class="page-button" type="button" data-page="2">3</button>
+      </nav>
+
+      <section class="panel pages-panel">
+        <div class="page active">
+          <button class="action-button accent" type="button" data-mode="walk">平地模式</button>
+          <button class="action-button" type="button" data-mode="terrain">综合地形</button>
+          <button class="action-button accent" type="button" data-mode="run">跑步模式</button>
+        </div>
+        <div class="page">
+          <button class="action-button" type="button" data-mode="sit">坐下</button>
+          <button class="action-button" type="button" data-mode="forward_jump">前跳</button>
+          <button class="action-button" type="button" data-mode="wave">招手</button>
+          <button class="action-button accent" type="button" data-mode="right_flip">侧空翻</button>
+        </div>
+        <div class="page">
+          <button class="action-button accent" type="button" data-mode="navigation">导航</button>
+          <button class="action-button accent" type="button" data-mode="ai_agent">AI</button>
+        </div>
+        <div id="page-status" class="page-status">第 1 页 · 键盘 Q/W/E/A/S/D 可控制移动</div>
+      </section>
+    </main>
+
+    <dialog id="robots-dialog" aria-labelledby="robots-title">
+      <div class="robots-heading"><b id="robots-title">机器狗列表</b><button id="robots-close" type="button">关闭</button></div>
+      <div id="robots-list" class="robots-list"></div>
+      <p class="robots-help">Wi-Fi 模式请连接 JDSK；热点模式请连接对应机器狗的热点。</p>
+    </dialog>
+
+    <aside id="rotate-prompt" class="rotate-prompt" aria-live="polite">
+      <div class="rotate-card">
+        <div class="phone-rotate" aria-hidden="true">↻</div>
+        <h2>请横屏使用遥控器</h2>
+        <p id="rotate-message">点击按钮进入全屏横屏模式</p>
+        <button id="enter-landscape" type="button">进入横屏</button>
+      </div>
+    </aside>
+
+    <dialog id="token-dialog">
+      <form method="dialog">
+        <img src="/icon.svg" alt="">
+        <h2>连接 K3</h2>
+        <p>输入启动日志中显示的访问码</p>
+        <input id="token-input" inputmode="numeric" autocomplete="one-time-code" maxlength="64" placeholder="访问码">
+        <output id="token-error"></output>
+        <button id="connect-button" value="default">连接遥控器</button>
+      </form>
+    </dialog>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

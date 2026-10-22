@@ -1,0 +1,227 @@
+# Model paths are relative to model_path (the policy directory).
+# Motion paths are relative to this YAML file.
+# SDK fields drive observation assembly and action mapping.
+# rl_default_pos: hardware order; action_scale/kp/kd: policy order.
+executor_defaults: &executor
+  backend: onnx
+  runtime: {provider: cpu, threads: 1}
+  action_blend_ratio: 1.0
+  infer_decimation: 1
+  model_io: &onnx_io
+    inputs: [{name: obs, source: observation}]
+    outputs: [{name: actions, target: action}]
+
+go2_modes:
+  walk: {models: [walk], required: true}
+  run: {models: [run], required: true}
+  terrain: {models: [terrain], required: true}
+  wave: {models: [wave], required: true}
+  right_flip: {models: [right_flip], required: true}
+  forward_jump:
+    models: [forward_jump]
+    required: true
+    motion: {path: ../resources/motions/11.go2_forward_jump.motion, frames: 86}
+  sit: {models: [sit], required: true}
+
+rl_policy:
+  type: onnx_infer
+  rl_dt: 0.02
+  onnx_infer:
+    policies:
+      walk:
+        action_joint_index: [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]
+        rl_default_pos: [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1, -1.5, 0.1, 1, -1.5]
+        action_scale: 0.25
+        kp: [25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0, 25.0]
+        kd: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+        command: {scale: [1, 1, 1]}
+        observation:
+          segment_0_terms: [ang_vel, gravity, command, dof_pos, dof_vel, last_action]
+          ang_vel_scale: 0.2
+          dof_pos_scale: 1.0
+          dof_pos_subtract_default: true
+          dof_vel_scale: 0.05
+          strict_dim_check: true
+        policy_adapter:
+          command_limits: [-1, 1, -0.4, 0.4, -1, 1]
+          quaternion: six_axis
+          last_action_scale: 1.0
+          target_clip: 100.0
+        <<: *executor
+        model_path: 1.go2_flat.onnx
+      run:
+        action_joint_index: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        rl_default_pos: [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1, -1.5, 0.1, 1, -1.5]
+        action_scale: 0.25
+        kp: [20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0]
+        kd: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+        command: {scale: [2, 2, 0.25]}
+        observation:
+          segment_0_terms: [ang_vel, gravity, command, dof_pos, dof_vel, last_action]
+          ang_vel_scale: 0.25
+          dof_pos_scale: 1.0
+          dof_pos_subtract_default: true
+          dof_vel_scale: 0.05
+          strict_dim_check: true
+          segment_0_mode: flat_history
+          segment_0_length: 5
+          segment_0_order: oldest_first
+          segment_0_include_current: true
+        policy_adapter:
+          command_limits: [-2, 3, -0.5, 0.5, -2, 2]
+          quaternion: six_axis
+          last_action_scale: 1.0
+          target_clip: 100.0
+        <<: *executor
+        model_path: 3.go2_run.onnx
+        model_io:
+          inputs: [{name: obs, source: observation}]
+          outputs:
+            - {name: actions, target: action}
+            - {name: 'onnx::Unsqueeze_130', target: ignore}
+            - {name: 'onnx::Concat_152', target: ignore}
+      terrain:
+        action_joint_index: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        rl_default_pos: [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1, -1.5, 0.1, 1, -1.5]
+        action_scale: 0.25
+        kp: [20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0, 20.0]
+        kd: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+        command: {scale: [2, 2, 0.25]}
+        observation:
+          segment_0_terms: [ang_vel, gravity, command, dof_pos, dof_vel, last_action]
+          ang_vel_scale: 0.25
+          dof_pos_scale: 1.0
+          dof_pos_subtract_default: true
+          dof_vel_scale: 0.05
+          strict_dim_check: true
+          segment_0_mode: flat_history
+          segment_0_length: 5
+          segment_0_order: oldest_first
+          segment_0_include_current: true
+        policy_adapter:
+          command_limits: [-1, 1, -0.5, 0.5, -2, 2]
+          quaternion: six_axis
+          last_action_scale: 1.0
+          target_clip: 100.0
+        <<: *executor
+        model_path: 2.go2_terrain.onnx
+        model_io:
+          inputs: [{name: obs, source: observation}]
+          outputs:
+            - {name: actions, target: action}
+            - {name: weights, target: ignore}
+            - {name: latent, target: ignore}
+      wave:
+        action_joint_index: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        rl_default_pos: [-0.06395703554, 0.83890676498, -1.67781352997, 0.06395703554, 0.83890676498, -1.67781352997, -0.06395703554, 0.83890676498, -1.67781352997, 0.06395703554, 0.83890676498, -1.67781352997]
+        action_scale: 0.3
+        kp: [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+        kd: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        command: {scale: [2, 2, 0.25]}
+        observation:
+          segment_0_terms: [ang_vel, gravity, dof_pos, dof_vel, last_action, reference_delta, reference_phase]
+          ang_vel_scale: 0.25
+          dof_pos_scale: 1.0
+          dof_pos_subtract_default: true
+          dof_vel_scale: 0.05
+          strict_dim_check: true
+        policy_adapter:
+          command_limits: [0, 0, 0, 0, 0, 0]
+          quaternion: six_axis
+          effort_limit: 23.5
+          velocity_limit: 30.0
+          last_action_scale: 1.0
+          last_action_clip: 1.0
+          target_clip: 1.0
+          joint_lower: [-1.02625588, -1.52018493, -2.70385065, -1.02625588, -1.52018493, -2.70385065, -1.02625588, -0.47298494, -2.70385065, -1.02625588, -0.47298494, -2.70385065]
+          joint_upper: [1.02625588, 3.44008479, -0.85660931, 1.02625588, 3.44008479, -0.85660931, 1.02625588, 4.48728473, -0.85660931, 1.02625588, 4.48728473, -0.85660931]
+          raised_action_scale: [0.3, 0.3, 0.3, 0.1, 0, 0, 0.3, 0.3, 0.3, 0.3, 0.3, 0.3]
+        <<: *executor
+        model_path: 10.go2_wave.onnx
+        custom_array_dims: {reference_delta: 12, reference_phase: 2}
+
+      right_flip:
+        action_joint_index: [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]
+        rl_default_pos: [0.1, 0.9, -1.8, -0.1, 0.9, -1.8, 0.1, 0.9, -1.8, -0.1, 0.9, -1.8]
+        action_scale: [0.335, 0.335, 0.335, 0.335, 0.335, 0.335, 0.335, 0.335, 0.174, 0.174, 0.174, 0.174]
+        kp: [17.692, 17.692, 17.692, 17.692, 17.692, 17.692, 17.692, 17.692, 65.219, 65.219, 65.219, 65.219]
+        kd: [1.126, 1.126, 1.126, 1.126, 1.126, 1.126, 1.126, 1.126, 4.152, 4.152, 4.152, 4.152]
+        command: {scale: [2, 2, 0.25]}
+        observation:
+          segment_0_terms: [reference_position, reference_velocity, reference_orientation, ang_vel, dof_pos, dof_vel, last_action]
+          ang_vel_scale: 1.0
+          dof_pos_scale: 1.0
+          dof_pos_subtract_default: true
+          dof_vel_scale: 1.0
+          strict_dim_check: true
+        policy_adapter:
+          command_limits: [0, 0, 0, 0, 0, 0]
+          quaternion: six_axis
+          last_action_scale: 1.0
+          target_clip: 100.0
+        <<: *executor
+        model_path: 18.go2_right_flip.onnx
+        model_io:
+          inputs:
+            - {name: obs, source: observation}
+            - {name: time_step, source: external}
+          outputs:
+            - {name: actions, target: action}
+            - {name: joint_pos, target: expose}
+            - {name: joint_vel, target: expose}
+            - {name: body_quat_w, target: expose}
+            - {name: body_pos_w, target: ignore}
+            - {name: body_lin_vel_w, target: ignore}
+            - {name: body_ang_vel_w, target: ignore}
+        custom_array_dims: {reference_orientation: 6, reference_position: 12, reference_velocity: 12}
+
+      forward_jump:
+        action_joint_index: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        rl_default_pos: [0, 0.7, -1.5, 0, 0.7, -1.5, 0, 0.7, -1.5, 0, 0.7, -1.5]
+        action_scale: [0.335, 0.335, 0.174, 0.335, 0.335, 0.174, 0.335, 0.335, 0.174, 0.335, 0.335, 0.174]
+        kp: [20, 20, 40, 20, 20, 40, 20, 20, 40, 20, 20, 40]
+        kd: [1, 1, 2, 1, 1, 2, 1, 1, 2, 1, 1, 2]
+        command: {scale: [2, 2, 0.25]}
+        observation:
+          segment_0_terms: [reference_position, reference_velocity, reference_orientation, ang_vel, dof_pos, dof_vel, last_action]
+          ang_vel_scale: 1.0
+          dof_pos_scale: 1.0
+          dof_pos_subtract_default: true
+          dof_vel_scale: 1.0
+          strict_dim_check: true
+        policy_adapter:
+          command_limits: [0, 0, 0, 0, 0, 0]
+          quaternion: six_axis
+          last_action_scale: 1.0
+          target_clip: 0.0
+        <<: *executor
+        model_path: 11.go2_forward_jump.onnx
+        custom_array_dims: {reference_orientation: 6, reference_position: 12, reference_velocity: 12}
+
+      sit:
+        action_joint_index: [3, 4, 5, 0, 1, 2, 9, 10, 11, 6, 7, 8]
+        rl_default_pos: [-0.06395705789, 0.838906765, -1.67781353, 0.06395705789, 0.838906765, -1.67781353, -0.06395705789, 0.838906765, -1.67781353, 0.06395705789, 0.838906765, -1.67781353]
+        action_scale: 0.3
+        kp: [40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+        kd: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+        command: {scale: [2, 2, 0.25]}
+        observation:
+          segment_0_terms: [ang_vel, gravity, dof_pos, dof_vel, last_action, reference_delta, reference_phase]
+          ang_vel_scale: 0.25
+          dof_pos_scale: 1.0
+          dof_pos_subtract_default: true
+          dof_vel_scale: 0.05
+          strict_dim_check: true
+        policy_adapter:
+          command_limits: [0, 0, 0, 0, 0, 0]
+          quaternion: six_axis
+          effort_limit: 23.5
+          velocity_limit: 30.0
+          last_action_scale: 1.0
+          last_action_clip: 1.0
+          target_clip: 1.0
+          joint_lower: [-1.02625588, -1.52018493, -2.70385065, -1.02625588, -1.52018493, -2.70385065, -1.02625588, -0.47298494, -2.70385065, -1.02625588, -0.47298494, -2.70385065]
+          joint_upper: [1.02625588, 3.44008479, -0.85660931, 1.02625588, 3.44008479, -0.85660931, 1.02625588, 4.48728473, -0.85660931, 1.02625588, 4.48728473, -0.85660931]
+        <<: *executor
+        model_path: 12.go2_sit.onnx
+        custom_array_dims: {reference_delta: 12, reference_phase: 2}

@@ -1,0 +1,19 @@
+{
+  "name": "Go2 SDK 网页控制",
+  "short_name": "Go2 SDK",
+  "description": "Go2 SDK 横屏网页遥控器",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#071116",
+  "theme_color": "#071116",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

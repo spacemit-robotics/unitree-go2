@@ -1,0 +1,23 @@
+[Unit]
+Description=Go2 SDK control, SBUS and web
+Requires=NetworkManager.service avahi-daemon.service
+After=NetworkManager.service avahi-daemon.service
+
+[Service]
+Type=exec
+User=root
+WorkingDirectory=/root/spacemit_robot
+Environment=SROBOTIS_ROOT=/root/spacemit_robot
+Environment=GO2_NETWORK_MODE=wifi
+ExecStart=/bin/bash /root/spacemit_robot/application/ros2/unitree-go2/scripts/start-go2.sh
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+KillMode=mixed
+TimeoutStopSec=50
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=go2-sdk
+
+[Install]
+WantedBy=multi-user.target
