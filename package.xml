@@ -3,7 +3,7 @@
   <name>unitree_go2</name>
   <version>0.1.0</version>
   <description>Go2 locomotion with Linux CPU inference on K3.</description>
-  <maintainer email="spideman2@users.noreply.github.com">spideman2</maintainer>
+  <maintainer email="robot_team@spacemit.com">robot_team</maintainer>
   <license>Apache-2.0</license>
   <buildtool_depend>ament_cmake</buildtool_depend>
   <build_depend>rosidl_default_generators</build_depend>
@@ -28,7 +28,7 @@
   <exec_depend>python3-numpy</exec_depend>
   <exec_depend>rclpy</exec_depend>
   <exec_depend>python3-aiortc</exec_depend>
-  <exec_depend>python3-opencv</exec_depend>
+  <exec_depend>ffmpeg</exec_depend>
   <exec_depend>python3-dbus</exec_depend>
   <exec_depend>network-manager</exec_depend>
   <exec_depend>avahi-daemon</exec_depend>

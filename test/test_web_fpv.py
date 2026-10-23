@@ -1,3 +1,6 @@
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """隔离验证网页图传生命周期，不启动 ROS 或图传程序。"""
 
 import ast
@@ -22,12 +25,13 @@ from urllib.parse import urlsplit
 source = Path(__file__).resolve().parents[1] / "scripts/web_teleop_server.py"
 tree = ast.parse(source.read_text())
 definitions = [item for item in tree.body
-               if isinstance(item, ast.ClassDef) and item.name == "FpvProcess"]
+               if isinstance(item, ast.ClassDef) and item.name in {"FpvProcess", "Camera"}]
 namespace = {"Path": Path, "os": os, "shutil": shutil, "signal": signal,
-             "subprocess": subprocess, "threading": threading,
+             "subprocess": subprocess, "threading": threading, "tempfile": __import__("tempfile"),
              "json": json, "time": time, "Any": object}
 exec(compile(ast.Module(body=definitions, type_ignores=[]), str(source), "exec"), namespace)
 FpvProcess = namespace["FpvProcess"]
+Camera = namespace["Camera"]
 web_node = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == "Go2WebNode")
 handler = next(item for item in web_node.body if isinstance(item, ast.FunctionDef) and item.name == "handler")
 with patch.dict("sys.modules", {"dbus": Mock()}):
@@ -47,6 +51,46 @@ for name in ("fpv_status", "update_fpv_rc", "set_mode"):
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
 
 
+class CameraTests(unittest.TestCase):
+    def test_missing_usb_camera_reports_cause_without_starting_processes(self):
+        camera = Camera()
+        with patch.object(camera, "_candidates", return_value=[]), patch.object(subprocess, "Popen") as start:
+            self.assertFalse(camera.set_enabled(True))
+            self.assertIn("未识别到 USB 摄像头", camera.status()["message"])
+            start.assert_not_called()
+        camera.close()
+        self.assertFalse(camera.status()["enabled"])
+
+    def test_missing_runtime_reports_dependencies(self):
+        camera = Camera()
+        with patch.object(camera, "_candidates", return_value=["/dev/video1"]), \
+                patch.object(shutil, "which", return_value=None), patch.object(subprocess, "Popen") as start:
+            self.assertFalse(camera.set_enabled(True))
+            self.assertIn("MediaMTX", camera.status()["message"])
+            start.assert_not_called()
+
+    def test_publisher_failure_stops_server_and_keeps_diagnostic(self):
+        camera = Camera()
+        publisher = Mock(pid=999999, returncode=1)
+        publisher.poll.return_value = 1
+        server = Mock(pid=999998)
+        server.poll.return_value = None
+        camera._processes = [server, publisher]
+        log = namespace["tempfile"].TemporaryFile()
+        log.write(b"USB disconnected")
+        log.flush()
+        camera._logs = [log]
+        with patch.object(os, "killpg") as kill:
+            state = camera.status()
+            self.assertFalse(state["enabled"])
+            self.assertIn("USB disconnected", state["message"])
+            kill.assert_called_once_with(server.pid, signal.SIGTERM)
+            server.wait.assert_called_once_with(timeout=1)
+            publisher.wait.assert_not_called()
+        self.assertTrue(log.closed)
+        self.assertEqual(camera._processes, [])
+
+
 class WifiStartupTests(unittest.TestCase):
     def test_ap_name_updates_new_and_existing_profiles(self):
         network_type = network_module["RobotNetwork"]
@@ -64,8 +108,6 @@ class WifiStartupTests(unittest.TestCase):
                         return "go2-sdk-ap-robot-a" if existing else ""
                     if args[1:3] == ("-g", "connection.uuid"):
                         return "ap-uuid"
-                    if args[1:3] == ("connection", "add"):
-                        state["ssid"] = args[args.index("ssid") + 1]
                     if args[1:3] == ("connection", "modify") and "802-11-wireless.ssid" in args:
                         state["ssid"] = args[args.index("802-11-wireless.ssid") + 1]
                     if args[0] == "ip":
@@ -75,17 +117,28 @@ class WifiStartupTests(unittest.TestCase):
                     return ""
 
                 command_mock = Mock(side_effect=command)
+                settings = Mock()
                 with patch.dict(globals_, {"command": command_mock, "open": Mock(return_value=Mock())}), \
                         patch.object(globals_["fcntl"], "flock"), \
-                        patch.object(globals_["socket"], "socket"):
+                        patch.object(globals_["socket"], "socket"), \
+                        patch.object(globals_["dbus"], "Interface", return_value=settings), \
+                        patch.object(globals_["dbus"], "Dictionary", side_effect=lambda value, **_: value), \
+                        patch.object(globals_["dbus"], "ByteArray", side_effect=bytes):
                     manager = network_type("robot-a", "ap", 8082, "10.0.91.250/23", "", "go2control",
                                            lambda: True, Mock(), ap_ssid="NewHotspot")
                     try:
                         self.assertEqual(state["ssid"], "NewHotspot")
                         self.assertEqual(manager.ssid, state["ssid"])
                         self.assertEqual(manager._restore_connection, "wifi-uuid")
-                        self.assertEqual(any(call.args[1:3] == ("connection", "add")
-                                             for call in command_mock.call_args_list), not existing)
+                        self.assertFalse(any(call.args[1:3] == ("connection", "add")
+                                             for call in command_mock.call_args_list))
+                        self.assertEqual(settings.AddConnection.call_count, 0 if existing else 1)
+                        if not existing:
+                            profile = settings.AddConnection.call_args.args[0]
+                            self.assertEqual(profile["802-11-wireless"], {"ssid": b"NewHotspot", "mode": "ap"})
+                            self.assertEqual(profile["connection"]["interface-name"], "wlan0")
+                            self.assertFalse(profile["connection"]["autoconnect"])
+                            self.assertEqual(profile["ipv4"]["method"], "shared")
                     finally:
                         manager.close()
 
@@ -389,13 +442,15 @@ class FpvHttpTests(unittest.TestCase):
         self.assertEqual(self.request("fpv/status"), (200, self.node.fpv_status()))
         self.assertEqual(self.request("fpv/capture", {"enabled": True})[0], 200)
         self.fpv.set_enabled.assert_called_once_with(True)
-        self.assertEqual(self.request("mode", {"mode": "walk"})[0], 503)
+        self.assertEqual(self.request("mode", {"mode": "terrain"})[0], 503)
 
     def test_removed_mode_is_rejected_without_calling_controller(self):
         self.ready.return_value = True
         self.node.mode_client = Mock()
         self.node.set_mode = lambda mode: namespace["set_mode"](self.node, mode)
-        self.assertEqual(self.request("mode", {"mode": "heart"}), (400, {"error": "unknown mode"}))
+        for mode in ("run", "heart", "right_flip"):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.request("mode", {"mode": mode}), (400, {"error": "unknown mode"}))
         self.node.mode_client.wait_for_service.assert_not_called()
         self.node.mode_client.call_async.assert_not_called()
 
@@ -416,7 +471,7 @@ class FpvHttpTests(unittest.TestCase):
                     self.assertEqual(response.status, 200)
                     response.read()
                     connection.request("POST", "/api/robots/robot-b/" + suffix,
-                                       json.dumps({"mode": "walk"}),
+                                       json.dumps({"mode": "terrain"}),
                                        {"X-Go2-Application": "unitree-go2-sdk", **headers})
                     response = connection.getresponse()
                     self.assertEqual(response.status, expected)
@@ -498,6 +553,13 @@ class FpvHttpTests(unittest.TestCase):
         self.fpv.status.return_value["enabled"] = True
         self.assertEqual(self.request("camera/toggle", {"enabled": True})[0], 409)
         self.camera.set_enabled.assert_not_called()
+
+    def test_missing_camera_returns_actionable_failure(self):
+        self.ready.return_value = True
+        self.camera.set_enabled.return_value = False
+        self.camera.status.return_value = {"enabled": False, "message": "未识别到 USB 摄像头"}
+        self.assertEqual(self.request("camera/toggle", {"enabled": True}),
+                         (503, {"error": "未识别到 USB 摄像头"}))
 
     def test_failed_capture_returns_failure_state(self):
         self.fpv.set_enabled.return_value = {"success": False, "enabled": False, "message": "missing camera"}

@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "policy.hpp"
 #include "controller.hpp"
 #include "rl_service.h"
@@ -81,29 +85,17 @@ Policy::Policy(
             load_errors_[mode] = e.what();
         }
     }
-    for (const auto mode : {Mode::kWalk, Mode::kRun, Mode::kTerrain, Mode::kWave, Mode::kRightFlip, Mode::kForwardJump,
-                Mode::kSit}) {
+    for (const auto mode : {Mode::kWalk, Mode::kWave, Mode::kTerrain, Mode::kForwardJump, Mode::kSit}) {
         if (!configured.count(mode))
             throw std::invalid_argument(std::string("missing policy mode: ") + mode_name(mode));
     }
-    // The controller can enter walk automatically after a motion finishes.
-    for (const auto mode : {Mode::kWalk, Mode::kRun, Mode::kTerrain, Mode::kWave, Mode::kRightFlip, Mode::kForwardJump,
-                Mode::kSit})
+    for (const auto mode : {Mode::kWalk, Mode::kWave, Mode::kTerrain, Mode::kForwardJump, Mode::kSit})
         if (!has_model(mode))
             throw std::invalid_argument(
                 std::string("required policy unavailable: ") + mode_name(mode) + ": " + load_error(mode));
     if (!motion_references_.count(Mode::kForwardJump))
         throw std::invalid_argument("missing motion reference configuration");
-    const std::vector<float> zeros(69U, 0.0F);
-    auto& right_flip = *models_.at(Mode::kRightFlip);
-    float time_step = 0.0F;
-    right_flip.SetModelInput("time_step", &time_step, 1);
-    (void)infer_action(right_flip, zeros);
-    const auto& body_quaternion = right_flip.GetModelOutput("body_quat_w");
-    if (body_quaternion.size() != 52U) throw std::runtime_error("right-flip body quaternion output mismatch");
-    initial_reference_quaternions_[Mode::kRightFlip] =
-        normalize({body_quaternion[0], body_quaternion[1], body_quaternion[2], body_quaternion[3]});
-    yaw_alignments_[Mode::kRightFlip] = {1, 0, 0, 0};
+
 }
 
 Policy::~Policy() = default;
@@ -117,7 +109,6 @@ Action Policy::infer(Mode mode, const std::vector<float>& input_observation,
     if (input_observation.size() != static_cast<std::size_t>(model.ObsDim()))
         throw std::invalid_argument("policy observation dimension mismatch");
     std::vector<float> observation = input_observation;
-    float time_step = 0.0F;
     if (mode == Mode::kForwardJump) {
         if (state == nullptr) throw std::invalid_argument("motion policy requires robot state");
         const auto& reference = motion_references_.at(mode);
@@ -134,52 +125,17 @@ Action Policy::infer(Mode mode, const std::vector<float>& input_observation,
             index + 1 == reference.size() ? Joints{} : ref.velocity, ref.quaternion, previous,
             yaw_alignments_.at(mode));
     }
-    if (mode == Mode::kRightFlip) {
-        const bool automatic_frame = policy_frame == std::numeric_limits<std::uint64_t>::max();
-        std::uint64_t frame = policy_frame;
-        if (automatic_frame) frame = steps_[mode]++;
-        time_step = static_cast<float>(frame);
-        if (state != nullptr) {
-            if (frame == 0U) {
-                yaw_alignments_[mode] =
-                    motion_yaw_alignment(state->imu.six_axis_quaternion, initial_reference_quaternions_.at(mode));
-            }
-            Joints position{}, velocity{};
-            Quaternion reference{};
-            {
-                std::lock_guard<std::mutex> execution_lock(adapter_->execution_mutex_);
-                const std::vector<float> zeros(69U, 0.0F);
-                model.SetModelInput("time_step", &time_step, 1);
-                (void)infer_action(model, zeros);
-                const auto& reference_position = model.GetModelOutput("joint_pos");
-                const auto& reference_velocity = model.GetModelOutput("joint_vel");
-                const auto& body_quaternion = model.GetModelOutput("body_quat_w");
-                if (reference_position.size() != kNumJoints || reference_velocity.size() != kNumJoints ||
-                    body_quaternion.size() != 52U)
-                    throw std::runtime_error("motion reference output dimension mismatch");
-                std::copy(reference_position.begin(), reference_position.end(), position.begin());
-                std::copy(reference_velocity.begin(), reference_velocity.end(), velocity.begin());
-                reference = {body_quaternion[0], body_quaternion[1], body_quaternion[2], body_quaternion[3]};
-            }
-            Action previous{};
-            std::copy_n(input_observation.begin() + adapter_->observation_term_offset(mode, "last_action"), kNumJoints,
-                previous.begin());
-            observation = adapter_->build_motion_observation(
-                mode, *state, position, velocity, reference, previous, yaw_alignments_[mode]);
-        }
-    }
+
 
     std::lock_guard<std::mutex> execution_lock(adapter_->execution_mutex_);
-    if (mode == Mode::kRightFlip) {
-        model.SetModelInput("time_step", &time_step, 1);
-    }
+
     return infer_action(model, observation);
 }
 
 void Policy::reset_mode(Mode mode, const RobotState* state) {
     std::lock_guard<std::mutex> lock(mutex_);
     steps_[mode] = 0U;
-    if (mode != Mode::kRightFlip && mode != Mode::kForwardJump) return;
+    if (mode != Mode::kForwardJump) return;
 
     const Quaternion actual = state == nullptr ? Quaternion{1, 0, 0, 0} : normalize(state->imu.six_axis_quaternion);
     yaw_alignments_[mode] = motion_yaw_alignment(actual, initial_reference_quaternions_.at(mode));

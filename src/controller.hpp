@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #ifndef CONTROLLER_HPP
 #define CONTROLLER_HPP
 #include "hardware.hpp"
@@ -7,9 +11,7 @@
 #include <vector>
 
 namespace go2 {
-constexpr std::size_t kObservationDim = 45;
 using Action = Joints;
-using Observation = std::array<float, kObservationDim>;
 struct VelocityCommand { float vx{0}, vy{0}, yaw{0}; };
 
 constexpr Joints kCrouchPose{0, 1.36F, -2.65F, 0, 1.36F, -2.65F,
@@ -17,8 +19,8 @@ constexpr Joints kCrouchPose{0, 1.36F, -2.65F, 0, 1.36F, -2.65F,
 constexpr Joints kStandKp{60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80};
 constexpr Joints kStandKd{5, 4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4};
 
-enum class Mode { kPassive, kCrouch, kStand, kWalk, kRun, kTerrain,
-    kWave, kRightFlip, kRollover, kForwardJump, kSit };
+enum class Mode { kPassive, kCrouch, kStand, kWave, kTerrain,
+    kRollover, kForwardJump, kSit, kWalk };
 const char* mode_name(Mode);
 Mode parse_mode(const std::string&);
 bool mode_uses_policy(Mode);
@@ -45,11 +47,9 @@ struct ControllerConfig {
     bool walking_tilt_protection{false};
     double stand_duration{1}, crouch_pose_duration{1}, crouch_duration{1};
     // Shared policy-side slew applies to web, terminal, SBUS, navigation and AI.
-    // Lower-speed moving modes use a short ramp; fast running keeps its envelope.
+    // Moving modes use a bounded velocity ramp.
     double move_linear_acceleration{4.0}, move_yaw_acceleration{8.0};
     double move_linear_deceleration{6.0}, move_yaw_deceleration{10.0};
-    double run_linear_acceleration{1.5}, run_yaw_acceleration{2.0};
-    double run_linear_deceleration{2.5}, run_yaw_deceleration{3.0};
     int maximum_temperature{77};
     float maximum_position{4}, maximum_velocity{50};
     Joints crouch_pose{-0.093852362F, 1.224573409F, -2.755849055F,
@@ -114,7 +114,6 @@ class Controller final {
     // Policy preparation keeps mode transitions before observation assembly.
     VelocityCommand policy_command(TimePoint);
     bool policy_phase_ready(const RobotState&, TimePoint);
-    void begin_flip_recovery(const RobotState&, TimePoint);
     PolicyRequest prepare_mode_observation(const RobotState&, VelocityCommand, TimePoint);
 
     // Core mode, command and watchdog state.
@@ -127,9 +126,6 @@ class Controller final {
     TimePoint velocity_at_{}, transition_at_{}, policy_at_{};
     TimePoint ramped_velocity_at_{};
     std::optional<TimePoint> imu_stale_since_;
-    std::optional<TimePoint> exit_gait_until_;
-    bool terrain_to_walk_pending_{false};
-    bool flip_walk_pending_{false};
     Joints initial_{}, target_{};
     std::size_t target_variant_ = 0;
     Action previous_{};
@@ -149,7 +145,7 @@ class Controller final {
     std::uint64_t policy_frame_{0};
     std::optional<float> sit_exit_start_;
     std::optional<TimePoint> sit_exit_stable_since_;
-    unsigned wave_tick_{0U};
+    unsigned wave_tick_{0};
     bool wave_raised_{true};
     // Mode-specific observation histories and entry/exit gates.
     std::array<float, 225> cts_history_{};

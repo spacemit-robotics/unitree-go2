@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Exercise the private event bridge without opening UARTs or creating teleop.
 #define main sbus_teleop_entry
 #include "../src/sbus_teleop_node.cpp"
@@ -12,9 +16,8 @@ struct SbusTeleopTestAccess {
     static void check_mode_mapping() {
         auto teleop = std::shared_ptr<SbusTeleopNode>(new SbusTeleopNode(false));
         const std::array<std::string, 18> modes = {
-            "", "terrain", "wave", "web", "navigation", "ai_agent",
-            "", "forward_jump", "walk", "run", "", "sit",
-            "", "", "", "", "", "right_flip"};
+            "terrain", "wave", "sit", "web", "navigation", "ai_agent",
+            "forward_jump", "", "walk", "", "", "", "", "", "", "", "", ""};
         rc_receiver_frame_t frame{};
         for (int slot = 1; slot <= 18; ++slot) {
             const int group = (slot - 1) % 9;
@@ -22,10 +25,8 @@ struct SbusTeleopTestAccess {
             frame.channels[5] = (group / 3) * RC_RECEIVER_CHANNEL_MAX / 2;  // F
             frame.channels[4] = (group % 3) * RC_RECEIVER_CHANNEL_MAX / 2;  // E
             assert(teleop->selected_slot(frame) == slot);
-            assert(teleop->mode_for_slot(slot) == (slot >= 10 && !modes[slot - 1].empty() ? "stand" : modes[slot - 1]));
+            assert(teleop->mode_for_slot(slot) == modes[slot - 1]);
         }
-        teleop->bright_modes_enabled_ = true;
-        for (int slot = 1; slot <= 18; ++slot) assert(teleop->mode_for_slot(slot) == modes[slot - 1]);
     }
 
     static void check_fpv_state() {

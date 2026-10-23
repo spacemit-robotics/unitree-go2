@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Runtime Wi-Fi/AP setup, LAN discovery and the shared Go2 web hostname."""
 
 from __future__ import annotations
@@ -12,6 +15,7 @@ import subprocess
 import threading
 import time
 from typing import Callable
+from uuid import uuid4
 
 import dbus
 
@@ -29,7 +33,8 @@ def valid_robot_id(robot: object) -> bool:
 def command(*args: str) -> str:
     result = subprocess.run(args, capture_output=True, text=True, timeout=30, check=False)
     if result.returncode:
-        raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "command failed")
+        raise RuntimeError(result.stderr.strip() or result.stdout.strip()
+                           or f"{args[0]} exited with code {result.returncode}")
     return result.stdout.strip()
 
 
@@ -118,8 +123,20 @@ class RobotNetwork:
                             "nmcli", "-g", "connection.uuid", "connection", "show", wifi_connection
                         ) if wifi_connection else ""
                 if profile not in profiles:
-                    command("nmcli", "connection", "add", "type", "wifi", "ifname", self.interface,
-                            "con-name", profile, "autoconnect", "no", "ssid", self.ssid)
+                    # Bianbu's nmcli 1.54.3 can crash while adding Wi-Fi profiles.
+                    # Use NetworkManager's settings API for creation instead.
+                    settings = dbus.Interface(
+                        self._bus.get_object("org.freedesktop.NetworkManager",
+                                             "/org/freedesktop/NetworkManager/Settings"),
+                        "org.freedesktop.NetworkManager.Settings",
+                    )
+                    settings.AddConnection(dbus.Dictionary({
+                        "connection": {"id": profile, "uuid": str(uuid4()),
+                                       "type": "802-11-wireless", "interface-name": self.interface,
+                                       "autoconnect": False},
+                        "802-11-wireless": {"ssid": dbus.ByteArray(self.ssid.encode("utf-8")), "mode": "ap"},
+                        "ipv4": {"method": "shared"}, "ipv6": {"method": "disabled"},
+                    }, signature="sa{sv}"))
                 command("nmcli", "connection", "modify", profile,
                         "802-11-wireless.ssid", self.ssid,
                         "802-11-wireless.mode", "ap", "802-11-wireless.band", ap_band,

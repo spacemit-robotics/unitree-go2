@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include <rc_receiver.h>
 
 #include <algorithm>
@@ -59,9 +63,8 @@ const char* switch_mode_display(const std::string& mode) {
     if (mode == "crouch") return "蹲下";
     if (mode == "sit") return "坐下";
     if (mode == "forward_jump") return "前跳";
-    if (mode == "wave") return "招手";
     if (mode == "walk") return "平地行走";
-    if (mode == "run") return "跑步";
+    if (mode == "wave") return "招手";
     if (mode == "navigation") return "导航";
     if (mode == "ai_agent") return "AI模式";
     if (mode == "terrain") return "综合地形";
@@ -69,9 +72,6 @@ const char* switch_mode_display(const std::string& mode) {
 }
 
 // Each policy is driven with the command limits used during its training.
-constexpr double kFlatForwardMps = 1.00;
-constexpr double kFlatLateralMps = 0.40;
-constexpr double kFlatYawRadS = 1.00;
 // Terrain policy (CTS comprehensive-terrain export): deployed physical envelope
 // in m/s and rad/s, i.e. exactly what /cmd_vel_rc carries.  Training sampled
 // vx=[-2,2] m/s, vy=[-1,1] m/s, yaw=[-2,2] rad/s; translation is deployed at
@@ -84,10 +84,6 @@ constexpr double kActionLateralMps = 0.25;
 constexpr double kActionYawRadS = 0.50;
 // Jump actor: the historical teleop envelope used +/-1.0 rad/s; large live yaw
 // makes the hopping gait fight its own heading, so it is deployed at half.
-constexpr double kV6RunForwardMps = 3.00;
-constexpr double kV6RunReverseMps = 2.00;
-constexpr double kV6RunLateralMps = 0.50;
-constexpr double kV6RunYawRadS = 2.00;
 
 // UART worker only copies frames. ROS executor owns all control decisions.
 class SbusFrameEvent final : public rclcpp::Waitable {
@@ -171,7 +167,6 @@ class SbusTeleopNode final : public rclcpp::Node {
         deadband_ = parameter(*this, "deadband", 0.01);
         frame_timeout_ = parameter(*this, "frame_timeout_sec", 0.25);
         shared_control_ = parameter(*this, "shared_control", false);
-        bright_modes_enabled_ = parameter(*this, "bright_modes_enabled", false);
         connection_timeout_ = parameter(*this, "connection_timeout_sec", 1.0);
         edge_debounce_ = parameter(*this, "edge_debounce_sec", 0.08);
         // CH3 is oriented opposite to CH2: 1722 is left-stick up, so no
@@ -299,68 +294,36 @@ class SbusTeleopNode final : public rclcpp::Node {
         const auto f = switch_position(frame, f_channel_);
         const auto e = switch_position(frame, e_channel_);
 
-        if (!b) {
-            if (f == SwitchPosition::kLow) {
-                if (e == SwitchPosition::kLow) return 1;     // 空
-                if (e == SwitchPosition::kMiddle) return 2;  // terrain
-                return 3;                                    // wave
-            }
-            if (f == SwitchPosition::kMiddle) {
-                if (e == SwitchPosition::kLow) return 4;     // 网页
-                if (e == SwitchPosition::kMiddle) return 5;  // 导航
-                return 6;                                    // AI模式
-            }
-            if (e == SwitchPosition::kLow) return 7;     // 空
-            if (e == SwitchPosition::kMiddle) return 8;  // forward_jump
-            return 9;                                    // walk
-        }
-
-        if (f == SwitchPosition::kLow) {
-            if (e == SwitchPosition::kLow) return 10;     // run
-            if (e == SwitchPosition::kMiddle) return 11;  // 空
-            return 12;                                    // sit
-        }
-        if (f == SwitchPosition::kMiddle) {
-            if (e == SwitchPosition::kLow) return 13;     // 空
-            if (e == SwitchPosition::kMiddle) return 14;  // 空
-            return 15;                                    // 空
-        }
-        if (e == SwitchPosition::kLow) return 16;     // 空
-        if (e == SwitchPosition::kMiddle) return 17;  // 空
-        return 18;                                    // 左翻/右翻
+        const int group = f == SwitchPosition::kLow ? 0 : f == SwitchPosition::kMiddle ? 1 : 2;
+        const int position = e == SwitchPosition::kLow ? 0 : e == SwitchPosition::kMiddle ? 1 : 2;
+        return (b ? 9 : 0) + group * 3 + position + 1;
     }
 
     std::string mode_for_slot(int slot) const {
-        // Keep the nominal mapping below; only RC mode selection is temporarily restricted.
-        if (!bright_modes_enabled_ && (slot == 10 || slot == 12 || slot == 18)) return "stand";
         switch (slot) {
-            case 2:
+            case 1:
                 return "terrain";
-            case 3:
+            case 2:
                 return "wave";
+            case 3:
+                return "sit";
             case 4:
                 return "web";
             case 5:
                 return "navigation";
             case 6:
                 return "ai_agent";
-            case 8:
+            case 7:
                 return "forward_jump";
             case 9:
                 return "walk";
-            case 10:
-                return "run";
-            case 12:
-                return "sit";
-            case 18:
-                return "right_flip";
             default:
                 return "";
         }
     }
 
     bool is_joystick_mode(const std::string& mode) const {
-        return mode == "walk" || mode == "run" || mode == "terrain";
+        return mode == "walk" || mode == "terrain";
     }
 
     bool button_edge(bool current, bool& previous, TimePoint& last_edge, TimePoint now) {
@@ -602,8 +565,8 @@ class SbusTeleopNode final : public rclcpp::Node {
             // Let one-shot action actors keep ownership through their motion when a
             // receiver dropout is caused by vibration; an explicit D-button request
             // still stops them when valid frames return.
-            if (current_mode_ == "wave" || current_mode_ == "right_flip" || current_mode_ == "forward_jump" ||
-                current_mode_ == "sit") {
+            if (current_mode_ == "forward_jump" ||
+                current_mode_ == "sit" || current_mode_ == "wave") {
                 RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "遥控器帧超时，但当前动作策略继续运行");
                 return;
             }
@@ -667,17 +630,10 @@ class SbusTeleopNode final : public rclcpp::Node {
             max_forward = kV6TerrainForwardMps;
             max_lateral = kV6TerrainLateralMps;
             max_yaw = kV6TerrainYawRadS;
-        } else if (current_mode_ == "run") {
-            // Keep the fixed v6 IsaacGym running envelope. Controller applies the
-            // acceleration limit before inference.
-            max_forward =
-                axis(latest_frame_, forward_channel_, invert_forward_) >= 0.0F ? kV6RunForwardMps : kV6RunReverseMps;
-            max_lateral = kV6RunLateralMps;
-            max_yaw = kV6RunYawRadS;
         } else if (current_mode_ == "walk" || current_mode_ == "navigation") {
-            max_forward = kFlatForwardMps;
-            max_lateral = kFlatLateralMps;
-            max_yaw = kFlatYawRadS;
+            max_forward = 1.0;
+            max_lateral = 0.4;
+            max_yaw = 1.0;
         } else {
             // Other joystick actions keep the conservative action envelope.
             max_forward = kActionForwardMps;
@@ -706,7 +662,6 @@ class SbusTeleopNode final : public rclcpp::Node {
     double deadband_{0.01};
     double frame_timeout_{0.25}, edge_debounce_{0.08}, connection_timeout_{1.0};
     bool shared_control_{false};
-    bool bright_modes_enabled_{false};
     int input_slot_{0};
     // 原厂 SportModeFsm::GetJoystick 对横移和偏航都取负号：vy=-CH4，yaw=-CH1。
     // 因此当前遥控器默认保持这两个反向映射；不要把入口站立摆动误判成 yaw 符号问题。

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """v9-style browser controller backed by simple Go2 ROS 2 interfaces."""
 
 from __future__ import annotations
@@ -15,6 +18,7 @@ import shutil
 import signal
 import subprocess
 import threading
+import tempfile
 import time
 from typing import Any
 from urllib.parse import urlsplit
@@ -31,11 +35,6 @@ from unitree_go2.srv import SetMode
 from go2_network import APPLICATION_ID, RobotNetwork, valid_robot_id
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
 
-try:
-    import cv2
-except ImportError:  # pragma: no cover - board image normally includes OpenCV
-    cv2 = None
-
 MODES = {
     "passive": "passive",
     "passive_direct": "passive_direct",
@@ -44,10 +43,8 @@ MODES = {
     "forward_jump": "forward_jump",
     "stand": "stand",
     "walk": "walk",
-    "run": "run",
-    "terrain": "terrain",
     "wave": "wave",
-    "right_flip": "right_flip",
+    "terrain": "terrain",
     "rollover": "rollover",
     "navigation": "walk",
     "ai_agent": "walk",
@@ -200,11 +197,16 @@ class WebControl:
 
 
 class Camera:
-    def __init__(self, device: str = "auto", width: int = 640, height: int = 360, fps: int = 15) -> None:
+    """One hardware encoder publishes RTSP; MediaMTX serves WebRTC to all viewers."""
+
+    def __init__(self, device: str = "auto", width: int = 640, height: int = 360, fps: int = 30,
+                 config: str = "") -> None:
         self.device, self.width, self.height, self.fps = device, width, height, max(1, fps)
-        self._capture = None
+        self.config = config
         self._active_device = None
-        self._enabled = False
+        self._processes = []
+        self._logs = []
+        self._fault = ""
         self._lock = threading.Lock()
 
     def _candidates(self) -> list[str]:
@@ -232,52 +234,123 @@ class Camera:
                 continue
         return candidates
 
+    def _ready(self) -> bool:
+        connection = HTTPConnection("127.0.0.1", 9997, timeout=0.2)
+        try:
+            connection.request("GET", "/v3/paths/get/camera")
+            response = connection.getresponse()
+            return response.status == 200 and json.loads(response.read(65536)).get("ready") is True
+        except (OSError, HTTPException, ValueError):
+            return False
+        finally:
+            connection.close()
+
+    def _stop(self) -> None:
+        for process in reversed(self._processes):
+            if process.poll() is None:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                try:
+                    process.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    process.wait(timeout=1)
+        self._processes.clear()
+        for log in self._logs:
+            log.close()
+        self._logs.clear()
+        self._active_device = None
+
+    def _failure(self, message: str) -> None:
+        details = []
+        for log in self._logs:
+            log.seek(max(0, os.fstat(log.fileno()).st_size - 1200))
+            details.append(log.read().decode(errors="replace").strip())
+        self._fault = message + ("：" + "\n".join(filter(None, details)) if any(details) else "")
+        self._stop()
+
+    def _start(self, arguments: list[str]) -> None:
+        log = tempfile.TemporaryFile()
+        self._logs.append(log)
+        self._processes.append(subprocess.Popen(
+            arguments, stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True,
+        ))
+
     def set_enabled(self, enabled: bool) -> bool:
         with self._lock:
             if not enabled:
-                self._enabled = False
-                if self._capture is not None:
-                    self._capture.release()
-                    self._capture = None
-                self._active_device = None
+                self._stop()
+                self._fault = ""
                 return False
-            if cv2 is None:
+            if len(self._processes) == 2 and all(p.poll() is None for p in self._processes):
+                return True
+            self._stop()
+            self._fault = ""
+            candidates = self._candidates()
+            if not candidates:
+                self._fault = "未识别到 USB 摄像头（1bcf:28c4），请检查 USB 接线和供电"
                 return False
-            if self._capture is None:
-                for candidate in self._candidates():
-                    capture = cv2.VideoCapture(candidate, cv2.CAP_V4L2)
-                    if capture.isOpened():
-                        capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-                        capture.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-                        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-                        capture.set(cv2.CAP_PROP_FPS, self.fps)
-                        self._capture = capture
-                        self._active_device = candidate
+            if not shutil.which("mediamtx") or not shutil.which("ffmpeg") or not Path(self.config).is_file():
+                self._fault = "摄像头图传依赖未安装：需要 MediaMTX、FFmpeg 和 mediamtx.yaml"
+                return False
+            try:
+                self._start(["mediamtx", self.config])
+                # Wait for this server to bind before starting its publisher.
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline:
+                    if self._processes[0].poll() is not None:
+                        self._failure("MediaMTX 启动失败")
+                        return False
+                    connection = HTTPConnection("127.0.0.1", 9997, timeout=0.1)
+                    try:
+                        connection.request("GET", "/v3/paths/list")
+                        if connection.getresponse().status == 200:
+                            break
+                    except (OSError, HTTPException):
+                        time.sleep(0.05)
+                    finally:
+                        connection.close()
+                else:
+                    self._failure("MediaMTX 启动超时")
+                    return False
+                self._active_device = candidates[0]
+                self._start([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+                    "-f", "v4l2", "-input_format", "mjpeg", "-framerate", str(self.fps),
+                    "-video_size", f"{self.width}x{self.height}", "-i", self._active_device,
+                    "-an", "-vf", "format=nv12", "-c:v", "h264_stcodec", "-b:v", "1500k",
+                    "-g", str(max(1, self.fps // 2)), "-bf", "0", "-flush_packets", "1",
+                    "-f", "rtsp", "-rtsp_transport", "tcp", "rtsp://127.0.0.1:8554/camera",
+                ])
+                deadline = time.monotonic() + 3
+                while time.monotonic() < deadline:
+                    if any(p.poll() is not None for p in self._processes):
                         break
-                    capture.release()
-            self._enabled = self._capture is not None
-            return self._enabled
+                    if self._ready():
+                        return True
+                    time.sleep(0.05)
+                self._failure("摄像头未能输出 H.264 画面")
+            except OSError as exc:
+                self._failure(f"摄像头启动失败：{exc}")
+            return False
 
     def status(self) -> dict[str, Any]:
         with self._lock:
+            if self._processes and any(p.poll() is not None for p in self._processes):
+                self._failure("摄像头图传进程已退出")
             return {
-                "enabled": self._enabled,
+                "enabled": len(self._processes) == 2,
                 "device": self._active_device or self.device,
                 "model": "Tstc USB Full HD Camera",
-                "width": self.width,
-                "height": self.height,
-                "fps": self.fps,
+                "width": self.width, "height": self.height, "fps": self.fps,
+                "transport": "webrtc", "webrtc_port": 8889,
+                "message": self._fault,
             }
-
-    def jpeg(self) -> bytes | None:
-        with self._lock:
-            if not self._enabled or self._capture is None:
-                return None
-            ok, frame = self._capture.read()
-            if not ok:
-                return None
-            ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
-            return encoded.tobytes() if ok else None
 
     def close(self) -> None:
         self.set_enabled(False)
@@ -415,7 +488,8 @@ class Go2WebNode(Node):
             str(self.declare_parameter("camera_device", "auto").value),
             int(self.declare_parameter("camera_width", 640).value),
             int(self.declare_parameter("camera_height", 360).value),
-            int(self.declare_parameter("camera_fps", 15).value),
+            int(self.declare_parameter("camera_fps", 30).value),
+            str(share / "config/mediamtx.yaml"),
         )
         prefix = share.parent.parent
         fpv_port = int(self.declare_parameter("fpv_control_port", 8081).value)
@@ -687,7 +761,7 @@ class Go2WebNode(Node):
                 robot, suffix = parts[3:]
                 allowed = {
                     "status", "command", "stop", "light/toggle", "camera/status",
-                    "camera/toggle", "camera/stream", "audio/play", "rtc/offer", "mode",
+                    "camera/toggle", "audio/play", "rtc/offer", "mode",
                     "fpv/status", "fpv/capture",
                 }
                 if suffix not in allowed:
@@ -703,7 +777,7 @@ class Go2WebNode(Node):
                 if endpoint is None:
                     self.send_json(503, {"error": "robot is not connected to this network"})
                     return None
-                connection = HTTPConnection(*endpoint, timeout=8 if suffix == "rtc/offer" else 4)
+                connection = HTTPConnection(*endpoint, timeout=8 if suffix in {"rtc/offer", "camera/toggle"} else 4)
                 headers = {"X-Go2-Robot": robot, "X-Go2-Application": APPLICATION_ID,
                            "Content-Type": "application/json"}
                 headers_sent = False
@@ -713,27 +787,14 @@ class Go2WebNode(Node):
                     connection.request(self.command, route + query, body=body, headers=headers)
                     response = connection.getresponse()
                     content_type = response.getheader("Content-Type", "application/json")
-                    stream = suffix == "camera/stream" and response.status == 200
-                    data = None if stream else response.read(65536)
+                    data = response.read(65536)
                     self.send_response(response.status)
                     self.send_header("Content-Type", content_type)
                     self.send_header("Cache-Control", "no-store")
-                    if stream:
-                        self.send_header("Connection", "close")
-                        self.close_connection = True
-                    if data is not None:
-                        self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Content-Length", str(len(data)))
                     self.end_headers()
                     headers_sent = True
-                    if stream:
-                        while True:
-                            chunk = response.read1(16384)
-                            if not chunk:
-                                break
-                            self.wfile.write(chunk)
-                            self.wfile.flush()
-                    else:
-                        self.wfile.write(data)
+                    self.wfile.write(data)
                 except (BrokenPipeError, ConnectionResetError):
                     pass
                 except (OSError, HTTPException) as exc:
@@ -759,33 +820,6 @@ class Go2WebNode(Node):
                     return
                 if path == "/api/fpv/status":
                     self.send_json(200, node.fpv_status())
-                    return
-                if path == "/api/camera/stream":
-                    if not node.camera.status()["enabled"]:
-                        self.send_json(409, {"error": "camera is disabled"})
-                        return
-                    self.send_response(200)
-                    self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
-                    self.send_header("Connection", "close")
-                    self.close_connection = True
-                    self.end_headers()
-                    try:
-                        while node.camera.status()["enabled"]:
-                            frame = node.camera.jpeg()
-                            if frame is None:
-                                time.sleep(0.05)
-                                continue
-                            self.wfile.write(
-                                b"--frame\r\nContent-Type: image/jpeg\r\nContent-Length: "
-                                + str(len(frame)).encode()
-                                + b"\r\n\r\n"
-                                + frame
-                                + b"\r\n"
-                            )
-                            self.wfile.flush()
-                            time.sleep(1 / node.camera.fps)
-                    except (BrokenPipeError, ConnectionResetError):
-                        pass
                     return
                 if path not in static:
                     self.send_json(404, {"error": "not found"})
@@ -855,9 +889,9 @@ class Go2WebNode(Node):
                                 return
                             enabled = node.camera.set_enabled(payload["enabled"])
                         if payload["enabled"] and not enabled:
-                            self.send_json(503, {"error": "unable to open Tstc USB Full HD Camera (1bcf:28c4)"})
+                            self.send_json(503, {"error": node.camera.status()["message"]})
                             return
-                        self.send_json(200, node.camera.status())
+                        self.send_json(200, {**node.camera.status(), "webrtc_host": node.network.address})
                         return
                     if path == "/api/fpv/capture":
                         if not isinstance(payload, dict) or not isinstance(payload.get("enabled"), bool):

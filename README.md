@@ -2,9 +2,11 @@
 
 本仓库仅包含 Go2 应用，检出到 SDK 的 `application/ros2/unitree-go2`。
 `clients/android` 和 `clients/web` 分别保存 Android 客户端与控制网页。
-模型从 SpacemiT 模型库下载到应用内的 `policy/`，该目录不纳入 Git；
-构建时安装到应用共享目录，启动时可用 `model:=...` 指定其他目录。
-文件清单与校验值保存在 `config/model_manifest.yaml`。
+模型通过 `scripts/download_models_go2.py` 从 SpacemiT 模型库下载到应用内的 `policy/`，该目录不纳入 Git。
+离线模型包 `unitree-go2.tar.gz` 只包含 ONNX 权重，解压到同一目录。
+下载、解压与安装命令见[首次构建](#首次构建)。构建时模型安装到应用共享目录，启动时可用 `model:=...` 指定其他目录。
+文件清单与校验值保存在 `config/model_manifest.yaml`，权重与本仓库的策略配置、参考动作配套使用。
+各模型的来源见 [模型声明](MODEL_SOURCES.md)，版权及许可汇总见 [NOTICE](NOTICE)，原始许可保存在 `LICENSES/`。
 参考动作保存在 `resources/motions/`，原始模型参数保存在 `config/model_metadata/`，随应用安装。
 RL、motor、IMU、SBUS 和 LED 分别使用 SDK 的 `components/model_zoo/rl`、
 `components/peripherals/{motor,imu,rc_receiver,led}` 独立仓库，不在本仓库复制维护。
@@ -29,8 +31,9 @@ RL、motor、IMU、SBUS 和 LED 分别使用 SDK 的 `components/model_zoo/rl`�
 | [go2edu.yaml](config/robots/go2edu.yaml) | Go2 Edu（`go2edu`） | 217 |
 | [go2air1.yaml](config/robots/go2air1.yaml) | Go2 Air1（`go2air1`） | 218 |
 | [go2air2.yaml](config/robots/go2air2.yaml) | Go2 Air2（`go2air2`） | 219 |
+| [go2air3.yaml](config/robots/go2air3.yaml) | Go2 Air3（`go2air3`） | 220 |
 
-三份参考均使用 `new_bigcore`，默认沿用板子当前连接的 Wi-Fi。
+这些参考均使用 `new_bigcore`，默认沿用板子当前连接的 Wi-Fi。
 首次部署或更换标定时，在对应机器狗的板端选择匹配的文件安装。例如 Go2 Air2：
 
 ```bash
@@ -76,6 +79,128 @@ bash application/ros2/unitree-go2/scripts/start-go2.sh
 手机或 PC 连接同一 Wi-Fi 后，打开 [统一控制网页](http://go2-sdk.local:8082/)，
 在右上角选择实际在线的机器狗。Android App 也可自动发现服务或手动设置板端地址。
 
+手动使用热点时，先停止已有的 Go2 程序，再在板端后台启动：
+
+```bash
+cd /root/spacemit_robot
+nohup env GO2_NETWORK_MODE=ap bash application/ros2/unitree-go2/scripts/start-go2.sh >/tmp/go2-ap.log 2>&1 </dev/null &
+```
+
+后台启动可避免切换热点时 Wi-Fi SSH 断开导致程序退出，日志保存在 `/tmp/go2-ap.log`。
+热点名称来自本机配置的 `robot.ap_ssid`，Air3 为 `Go2-go2air3`；默认密码为 `go2control`。
+手机或 PC 连上热点后，打开 [热点控制网页](http://10.0.91.250:8082/)。
+
+关闭手动热点时，PC 连着热点，另开终端执行（以 Air3 为例）：
+
+```bash
+ssh -o HostName=10.0.91.250 Ogo2air3
+pgrep -f '[/]ros2 launch unitree_go2 go2.launch.py' | xargs -r kill -INT
+```
+
+程序退出会关闭热点并尝试恢复原来的 Wi-Fi，SSH 随之断开。重新使用 Wi-Fi 模式时，执行上面的普通启动命令。
+
+### 更换 Wi-Fi
+
+将 K3 调试串口（UART0 / Console）连接到 Linux PC，并给板子上电。
+Go2 定制板按板子丝印与 USB 转串口模块同名连接：**RX 接 RX、TX 接 TX、GND 接 GND**。
+
+1. **PC：查找串口设备。**
+
+   ```bash
+   ls -l /dev/ttyUSB* /dev/ttyACM* 2>/dev/null
+   ```
+
+   查看设备名称与串口编号的对应关系，确认连接 K3 调试串口的设备：
+
+   ```bash
+   ls -l /dev/serial/by-id/
+   ```
+
+2. **PC：打开串口终端。** 将 `/dev/ttyUSB0` 替换为上一步确认的设备。
+   未安装 minicom 时，先执行 `sudo apt install minicom`。
+
+   ```bash
+   sudo minicom -D /dev/ttyUSB0 -b 115200 -8
+   ```
+
+   按 `Ctrl+A`，再按 `O`，进入 **Serial port setup**，确认 **115200 8N1**，
+   将 **Hardware Flow Control** 和 **Software Flow Control** 都设为 **No**，返回串口终端。
+   按回车显示 Linux 的 `login:` 提示后，输入默认用户名 `root`；
+   在 `Password:` 提示后输入默认密码 `bianbu`，密码输入不回显。已修改密码时使用修改后的密码。
+   出现 `root@主机名:~#` 命令提示符后，再执行以下板端命令。
+
+3. **板端：更换 Wi-Fi。** 在串口终端执行：
+
+   ```bash
+   nmcli radio wifi on
+   PAGER='' nmcli --colors no -f SSID,SIGNAL,SECURITY device wifi list --rescan yes
+   ```
+
+   扫描结果直接输出，不进入分页界面；`SSID` 为 Wi-Fi 名称，`SIGNAL` 为信号强度，
+   `SECURITY` 为加密方式。输出结束回到命令提示符后，打开网络选择界面：
+
+   ```bash
+   nmtui connect
+   ```
+
+   若已打开的 nmtui 只显示当前连接，先通过“返回”退出，重新扫描后再打开，刷新可选网络列表。
+   `nmtui connect` 直接打开 **启用连接** 界面；如果执行的是 `nmtui`，
+   在主菜单选择第二项 **启用连接**，再按回车。
+   用 `↑↓` 选择目标 Wi-Fi，按 `Tab` 切换到右侧“激活”按钮，再按回车，按提示输入 Wi-Fi 密码并确认。
+   连接成功后选择“返回”并退出。已有 Wi-Fi 配置可保留。
+
+4. **板端串口：保存连接并查看 IP。** 查看当前连接名：
+
+   ```bash
+   PAGER='' nmcli -f DEVICE,TYPE,STATE,CONNECTION device status
+   ```
+
+   找到 `TYPE` 为 `wifi`、状态为 `connected` 的网卡。
+   将下面的“Wi-Fi 连接名”替换为 `CONNECTION` 列的实际名称，保存自动连接设置：
+
+   ```bash
+   nmcli connection modify "Wi-Fi 连接名" connection.autoconnect yes connection.autoconnect-priority 100
+   ```
+
+   `/etc/unitree-go2/robot.yaml` 中的 `robot.wifi_connection` 保持为空（`wifi_connection: ''`），
+   启动时沿用当前连接；若已指定其他网络，只清空这一项，保留其他身份和标定配置。
+
+   在串口终端查询板端 IP：
+
+   ```bash
+   ip -br addr
+   ```
+
+   找到 Wi-Fi 网卡（例如 `wlx140a02ffbfcc`）这一行，读取 IPv4 地址。
+   例如显示 `192.168.1.80/24`，SSH 使用 `192.168.1.80`，不带 `/24`。
+
+5. **PC：通过 Wi-Fi 登录板子。** PC 连接与板子相同的 Wi-Fi，在 PC 新开终端，
+   将下面的 IP 替换为上一步查到的地址：
+
+   ```bash
+   ssh root@192.168.1.80
+   ```
+
+   首次连接出现主机指纹确认提示时输入 `yes`，在 `Password:` 提示后输入默认密码 `bianbu`，
+   密码输入不回显；已修改密码时使用修改后的密码。此流程使用密码登录，无需配置 SSH 免密。
+   Wi-Fi 配置完成后即可断开串口，后续操作在 SSH 终端进行。
+
+6. **SSH 终端：启动 Go2。** 机器狗摆回启动蹲姿后执行：
+
+   ```bash
+   cd /root/spacemit_robot
+   bash application/ros2/unitree-go2/scripts/start-go2.sh
+   ```
+
+   使用自启服务时，在 SDK 根目录改为执行 `bash application/ros2/unitree-go2/scripts/wifi.sh`，
+   保存 Wi-Fi 模式并启动服务；两种启动方式选一种。
+
+7. **手机或 PC：访问网页或 App。** 连接与板子相同的 Wi-Fi，Go2 启动后打开
+   `http://go2-sdk.local:8082/`，在网页右上角选择机器狗；Android App 可直接自动发现并连接。
+   也可直接打开 `http://192.168.1.80:8082/`（替换为第 4 步查到的 IP），App 的手动地址填写同一地址。
+   地址需包含 `http://` 和端口 `:8082`。PC 开启系统代理时，将 `go2-sdk.local` 和板端当前 IP
+   加入“忽略代理 / 直连”列表。
+
 ### 开机自启
 
 所有板子使用同一个 `go2-sdk.service`，从 `/etc/unitree-go2/robot.yaml` 读取本机配置。
@@ -114,8 +239,7 @@ bash wifi.sh  # 切换为 Wi-Fi
 ```
 
 模式保存在 `/etc/systemd/system/go2-sdk.service.d/network.conf`，更新代码不会覆盖。
-热点名称来自本机配置的 `robot.ap_ssid`，默认密码 `go2control`，地址为
-[10.0.91.250:8082](http://10.0.91.250:8082/)。切换网络时原来的 Wi-Fi SSH 连接可能断开。
+热点连接信息与上面的手动启动相同；切换网络时原来的 Wi-Fi SSH 连接可能断开。
 
 ### SBUS 接线与按键
 
@@ -124,18 +248,16 @@ bash wifi.sh  # 切换为 Wi-Fi
 B、F、E 选档，H 低/中时按 C 进入模式；**H 高 + C** 切换白灯。网页与 SBUS 同时启用时，切到 **4 号位**立即交给网页，
 无需按 C；切出 4 号位后恢复遥控器控制，关闭遥控器或持续断连也会交给网页。
 
-**5 号位**导航接收 `/cmd_vel`，**6 号位** AI 模式接收 `/cmd_vel_ai`，均使用 1 号平地模型。
+**5 号位**导航接收 `/cmd_vel`，**6 号位** AI 模式接收 `/cmd_vel_ai`，均使用平地行走模型。
 
 | &emsp;B&emsp; | &emsp;F&emsp; | &emsp;E 低&emsp; | &emsp;E 中&emsp; | &emsp;E 高&emsp; |
 | --- | --- | --- | --- | --- |
-| &emsp;暗&emsp; | &emsp;低&emsp; | &emsp;**1** 空&emsp; | &emsp;**2** 综合地形&emsp; | &emsp;**3** 招手&emsp; |
+| &emsp;暗&emsp; | &emsp;低&emsp; | &emsp;**1** 综合地形&emsp; | &emsp;**2** 招手&emsp; | &emsp;**3** 坐下&emsp; |
 | &emsp;暗&emsp; | &emsp;中&emsp; | &emsp;**4** 网页模式&emsp; | &emsp;**5** 导航&emsp; | &emsp;**6** AI模式&emsp; |
-| &emsp;暗&emsp; | &emsp;高&emsp; | &emsp;**7** 空&emsp; | &emsp;**8** 前跳&emsp; | &emsp;**9** 平地行走&emsp; |
-| &emsp;亮&emsp; | &emsp;低&emsp; | &emsp;**10** 跑步&emsp; | &emsp;**11** 空&emsp; | &emsp;**12** 坐下&emsp; |
+| &emsp;暗&emsp; | &emsp;高&emsp; | &emsp;**7** 前跳&emsp; | &emsp;**8** 空&emsp; | &emsp;**9** 平地行走&emsp; |
+| &emsp;亮&emsp; | &emsp;低&emsp; | &emsp;**10** 空&emsp; | &emsp;**11** 空&emsp; | &emsp;**12** 空&emsp; |
 | &emsp;亮&emsp; | &emsp;中&emsp; | &emsp;**13** 空&emsp; | &emsp;**14** 空&emsp; | &emsp;**15** 空&emsp; |
-| &emsp;亮&emsp; | &emsp;高&emsp; | &emsp;**16** 空&emsp; | &emsp;**17** 空&emsp; | &emsp;**18** 右空翻&emsp; |
-
-B 亮的有效动作档在遥控器上临时执行站立，空档保持当前模式；设置 `sbus_bright_modes_enabled:=true` 可恢复。网页模式按钮不受此限制。
+| &emsp;亮&emsp; | &emsp;高&emsp; | &emsp;**16** 空&emsp; | &emsp;**17** 空&emsp; | &emsp;**18** 空&emsp; |
 
 | 紧急制动 | 模式 | 姿态 | 自起 / 灯光 |
 | --- | --- | --- | --- |
@@ -145,10 +267,13 @@ B 亮的有效动作档在遥控器上临时执行站立，空档保持当前模
 图传仅保留 native 接口，默认 `fpv_control_enabled:=false`，网页与遥控器 A 键均不启动图传。
 SDK 图传中间层就绪后，可用 `fpv_control_enabled:=true` 启用，调用 `fpv_sky`；
 程序与配置路径分别由 `fpv_executable`、`fpv_config` 指定。网页摄像头预览和图传不能同时开启。
+网页预览使用 K3 H.264 硬件编码与 MediaMTX WebRTC，需要安装 `ffmpeg` 和
+[MediaMTX riscv64 v1.20.1](https://github.com/Fitz8863/spacemit-mediamtx/releases/tag/v1.20.1-riscv64)，
+将 `mediamtx` 放入 `/usr/local/bin/`；打开、关闭摄像头时自动启停，使用 TCP 8889 和 UDP 8189。
 C、D 每次按下（通道状态变化）触发一次；H 高 + D 优先于同帧其他按键，4 号位也可紧急制动。
-正常休眠只等待当前模式已有的退出或恢复流程，例如招手收脚、坐下起身及单次动作收尾；
-普通站立、行走、跑步等没有退出流程的模式直接蹲下并进入被动。
-H 高 + D 可以中断正常休眠的退出等待；自起仅在被动/蹲下时可用。这里的蹲下是配置姿态过渡，不是 12 号坐下策略。
+正常休眠只等待当前模式已有的退出或恢复流程，例如招手放爪及坐下起身恢复；
+普通站立、行走等没有退出流程的模式直接蹲下并进入被动。
+H 高 + D 可以中断正常休眠的退出等待；自起仅在被动/蹲下时可用。这里的蹲下是配置姿态过渡，不是 3 号坐下策略。
 电机、IMU 和推理故障仍由原有保护逻辑优先处理。
 
 SBUS 通道与遥控器实体控件的默认对应关系如下（通道号从 1 开始）：
@@ -248,11 +373,8 @@ source ~/spacemit_robot/output/staging/setup.bash
 
 # 从下面选择一条执行
 ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: stand}'
-# ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: walk}'
-# ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: run}'
-# ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: terrain}'
 # ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: wave}'
-# ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: right_flip}'
+# ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: terrain}'
 # ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: forward_jump}'
 # ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: sit}'
 # ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: crouch}'
@@ -267,27 +389,49 @@ ros2 service call /go2/set_mode unitree_go2/srv/SetMode '{mode: passive}'
 启动时可用 `policy_config:=/absolute/path/policies.yaml` 指定配置文件；
 修改源码目录的配置后，需要重新安装包或显式指定该文件。
 
-SDK 需注册 `application/ros2/unitree-go2` 项目和 `k3-com260-unitree-go2` 目标；
-目标启用本应用及 RL、motor、IMU、rc_receiver、LED 组件。
-首次使用前，在 K3 构建并安装该应用：
-
-```bash
-cd ~/spacemit_robot
-source build/envsetup.sh
-lunch k3-com260-unitree-go2
-cd application/ros2/unitree-go2
-mm -j4
-```
-
 ## 首次构建
 
+SDK 需注册 `application/ros2/unitree-go2` 项目和 `k3-com260-unitree-go2` 目标；
+目标启用本应用及 RL、motor、IMU、rc_receiver、LED 组件。
+
+模型的发布目录为 [SpacemiT 模型库中的 unitree-go2/](https://archive.spacemit.com/spacemit-ai/model_zoo/rl/unitree-go2/)。
+在 K3 的 SDK 根目录执行：
+
+```bash
+cd ~/spacemit_robot
+python3 application/ros2/unitree-go2/scripts/download_models_go2.py
+```
+
+脚本按 `config/model_manifest.yaml` 下载当前模型并校验大小及 SHA-256，保存到
+`application/ros2/unitree-go2/policy/`。普通部署无需训练仓库或训练环境；策略参数、参考动作和许可声明由本代码仓库提供。
+
+离线部署时，从维护者获取与当前代码版本配套的 `unitree-go2.tar.gz`，在 K3 上保存为
+`~/Downloads/unitree-go2.tar.gz`。
+
+在 K3 的 SDK 根目录解压并校验：
+
+```bash
+cd ~/spacemit_robot
+mkdir -p application/ros2/unitree-go2/policy
+tar -xzf ~/Downloads/unitree-go2.tar.gz --strip-components=1 -C application/ros2/unitree-go2/policy
+python3 application/ros2/unitree-go2/scripts/download_models_go2.py --check
+```
+
+`policy/` 下应直接放置 ONNX 文件，校验成功显示 `Verified 5 files`。
+校验值不匹配时使用与当前代码配套的模型包，不通过改文件名替换不同策略。
+校验通过后构建并安装：
+
 ```bash
 cd ~/spacemit_robot
 source build/envsetup.sh
 lunch k3-com260-unitree-go2
-python3 application/ros2/unitree-go2/scripts/download_models_go2.py
 m
 ```
+
+模型默认从 `output/staging/share/unitree_go2/policy/` 加载。后续更新时，覆盖源码目录的
+`policy/` 并校验，再进入 `application/ros2/unitree-go2` 执行 `mm -j4` 重新安装。
+本机标定配置好后，按[直接运行](#直接运行)启动。
+开发者也可使用下载脚本的 `--training-repo` 参数，从本地训练归档准备权重。
 
 | 代码中的腿（丝印） | 新板大核 | 新板小核 | 现有软件设备 / 服务 |
 | --- | --- | --- | --- |
@@ -312,3 +456,8 @@ SBUS 节点。本机设备路径可在 `/etc/unitree-go2/robot.yaml` 的 `go2.ro
 ```bash
 ros2 launch unitree_go2 go2.launch.py board_profile:=legacy_usb backend:=mock web:=true web_port:=8082
 ```
+
+## License
+
+本组件源码文件头声明为 Apache-2.0，最终以本目录 [LICENSE](LICENSE) 文件为准。
+第三方模型保留原许可，见 [NOTICE](NOTICE) 和 [模型声明](MODEL_SOURCES.md)。

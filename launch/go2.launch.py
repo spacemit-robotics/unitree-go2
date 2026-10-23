@@ -1,3 +1,6 @@
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 import math
 from pathlib import Path
 import re
@@ -100,12 +103,6 @@ def _make_node(context):
         LaunchConfiguration("sbus_device").perform(context) or identity.get("sbus_device", profile["sbus_device"])
     )
     # Leave shared/local YAML values intact unless the caller explicitly overrides them.
-    run_parameters = {}
-    for name in ("run_linear_acceleration_mps2", "run_yaw_acceleration_rad_s2",
-                 "run_linear_deceleration_mps2", "run_yaw_deceleration_rad_s2"):
-        value = LaunchConfiguration(name).perform(context)
-        if value:
-            run_parameters[name] = ParameterValue(LaunchConfiguration(name), value_type=float)
     # Only the serial backend opens motor devices; mock runs clear all approvals.
     sbus_enabled = LaunchConfiguration("sbus").perform(context).lower() in ("true", "1", "yes")
     web_enabled = LaunchConfiguration("web").perform(context).lower() in ("true", "1", "yes")
@@ -140,7 +137,6 @@ def _make_node(context):
                     "motor_ids_verified": approved,
                     "joint_calibration_verified": approved,
                     "suspended_test_verified": approved,
-                    **run_parameters,
                 },
             ],
         )
@@ -158,9 +154,6 @@ def _make_node(context):
                     {
                         "device": sbus_device,
                         "shared_control": sbus_enabled and web_enabled,
-                        "bright_modes_enabled": ParameterValue(
-                            LaunchConfiguration("sbus_bright_modes_enabled"), value_type=bool
-                        ),
                         "connection_timeout_sec": ParameterValue(
                             LaunchConfiguration("sbus_connection_timeout_sec"), value_type=float
                         ),
@@ -286,10 +279,6 @@ def generate_launch_description():
             DeclareLaunchArgument("imu", default_value="", choices=["", "iwt603", "bmi270"]),
             DeclareLaunchArgument("imu_driver", default_value="", description="Optional low-level driver override"),
             DeclareLaunchArgument("imu_device", default_value="", description="Override selected IMU device path"),
-            DeclareLaunchArgument("run_linear_acceleration_mps2", default_value=""),
-            DeclareLaunchArgument("run_yaw_acceleration_rad_s2", default_value=""),
-            DeclareLaunchArgument("run_linear_deceleration_mps2", default_value=""),
-            DeclareLaunchArgument("run_yaw_deceleration_rad_s2", default_value=""),
             DeclareLaunchArgument(
                 "walking_tilt_protection", default_value="", choices=["", "true", "false"],
                 description="Walking tilt protection from the board-local config; "
@@ -316,7 +305,6 @@ def generate_launch_description():
             DeclareLaunchArgument("ap_band", default_value="a", choices=["a", "bg"]),
             DeclareLaunchArgument("ap_channel", default_value="0"),
             DeclareLaunchArgument("sbus", default_value="false", choices=["true", "false"]),
-            DeclareLaunchArgument("sbus_bright_modes_enabled", default_value="false", choices=["true", "false"]),
             DeclareLaunchArgument("sbus_device", default_value=""),
             DeclareLaunchArgument("sbus_accept_sbus2_footer", default_value="true", choices=["true", "false"]),
             DeclareLaunchArgument("sbus_forward_channel", default_value="3"),

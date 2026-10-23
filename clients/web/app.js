@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 (() => {
   "use strict";
 
@@ -5,11 +9,7 @@
   let applicationVerified = false;
   const conservativeLimits = [0.35, 0.25, 0.50];
   const modeLimits = {
-    // Match the flat policy's training curriculum limits.
     walk: [1.00, 0.40, 1.00],
-    // v6 IsaacGym running fast envelope.  The controller slews this command
-    // so a stick movement does not jump directly to 3.0 m/s.
-    run: [3.00, 0.50, 2.00],
     // CTS comprehensive-terrain physical envelope: half of the trained
     // translation range, full trained yaw range.
     terrain: [1.00, 0.50, 2.00],
@@ -21,7 +21,7 @@
   // unlike v9 it does not require a per-process access token.
   let token = "simple";
   let pendingMode = null;
-  let selectedMode = "walk";
+  let selectedMode = "terrain";
   let sending = false;
   let cameraEnabled = false;
   let fpvEnabled = false;
@@ -294,7 +294,7 @@
     cameraToggle.classList.remove("selected");
     cameraStatus.textContent = "摄像头关闭";
     controlSource = "web";
-    selectedMode = "walk";
+    selectedMode = "terrain";
     pendingMode = null;
     document.querySelectorAll(".action-button").forEach((button) => button.classList.remove("selected"));
     switchingRobot = false;
@@ -329,7 +329,7 @@
   }
 
   function reverseLimit() {
-    return selectedMode === "run" ? 2.00 : activeLimits()[0];
+    return activeLimits()[0];
   }
 
   async function enterLandscape() {
@@ -590,7 +590,7 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled: !cameraEnabled }),
         cache: "no-store",
-      });
+      }, 9000);
       const payload = response.payload;
       if (generation !== robotGeneration) return;
       if (!response.ok) throw new Error(payload.error || "camera error");
@@ -600,10 +600,17 @@
       cameraPlaceholder.hidden = cameraEnabled;
       cameraStream.hidden = !cameraEnabled;
       cameraStatus.textContent = cameraEnabled ? "摄像头已打开" : "摄像头关闭";
-      if (cameraEnabled) cameraStream.src = `${api("camera/stream")}?t=${Date.now()}`;
-      else cameraStream.removeAttribute("src");
-    } catch (_) {
-      if (generation === robotGeneration) cameraStatus.textContent = "摄像头打开失败";
+      if (cameraEnabled) {
+        const player = new URL(window.location.href);
+        player.hostname = payload.webrtc_host;
+        player.port = String(payload.webrtc_port);
+        player.pathname = "/camera";
+        player.search = "?controls=false&muted=true&autoplay=true&playsInline=true";
+        player.hash = "";
+        cameraStream.src = player.href;
+      } else cameraStream.removeAttribute("src");
+    } catch (error) {
+      if (generation === robotGeneration) cameraStatus.textContent = `摄像头打开失败：${error.message}`;
     }
   }
 
@@ -648,7 +655,7 @@
         axes.fill(0);
         showAxes();
       }
-      selectedMode = button.dataset.mode || "walk";
+      selectedMode = button.dataset.mode || "terrain";
       updateKeyboardAxes();
       document.querySelectorAll(".action-button").forEach((item) => item.classList.remove("selected"));
       button.classList.add("selected");
