@@ -6,9 +6,12 @@
 
 import argparse
 import hashlib
+from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 import shutil
 import sys
+import time
+from urllib.error import HTTPError
 from urllib.parse import quote, urljoin
 from urllib.request import urlopen
 
@@ -31,6 +34,32 @@ def matches(path, entry):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(block)
     return digest.hexdigest() == entry["sha256"]
+
+
+def download_model(url, target, entry):
+    temporary = target.with_name(target.name + ".part")
+    attempts = 3
+    for attempt in range(1, attempts + 1):
+        print(f"Downloading {url} (attempt {attempt}/{attempts})", flush=True)
+        try:
+            with urlopen(url, timeout=30) as response, temporary.open("wb") as stream:
+                shutil.copyfileobj(response, stream)
+            received = temporary.stat().st_size
+            if received != entry["bytes"]:
+                raise ConnectionError(f"incomplete download: expected {entry['bytes']} bytes, received {received}")
+            if not matches(temporary, entry):
+                raise ValueError(f"SHA-256 mismatch: {url}")
+            temporary.replace(target)
+            return
+        except (OSError, HTTPException) as error:
+            retryable = not isinstance(error, HTTPError) or error.code in (408, 429, 500, 502, 503, 504)
+            if not retryable or attempt == attempts:
+                raise RuntimeError(f"{url} (attempt {attempt}/{attempts}): {error}") from error
+            delay = 2 ** (attempt - 1)
+            print(f"Download attempt failed: {error}; retrying {url} in {delay}s", file=sys.stderr, flush=True)
+            time.sleep(delay)
+        finally:
+            temporary.unlink(missing_ok=True)
 
 
 def main():
@@ -66,16 +95,7 @@ def main():
             shutil.copyfile(source, target)
             print(f"Copied {name} from training archive", flush=True)
             continue
-        temporary = target.with_name(target.name + ".part")
-        print(f"Downloading {name}", flush=True)
-        try:
-            with urlopen(urljoin(base_url, quote(name)), timeout=30) as response, temporary.open("wb") as stream:
-                shutil.copyfileobj(response, stream)
-            if not matches(temporary, entry):
-                raise ValueError(f"Size or SHA-256 mismatch: {name}")
-            temporary.replace(target)
-        finally:
-            temporary.unlink(missing_ok=True)
+        download_model(urljoin(base_url, quote(name)), target, entry)
     if missing:
         print("Missing or invalid assets:\n" + "\n".join(missing), file=sys.stderr)
         return 1
@@ -86,6 +106,6 @@ def main():
 if __name__ == "__main__":
     try:
         sys.exit(main())
-    except (OSError, ValueError, KeyError, yaml.YAMLError) as error:
+    except (OSError, RuntimeError, ValueError, KeyError, yaml.YAMLError) as error:
         print(f"Model download failed: {error}", file=sys.stderr)
         sys.exit(1)
