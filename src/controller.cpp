@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "controller.hpp"
 #include "policy.hpp"
 #include <algorithm>
@@ -168,24 +172,23 @@ Joints rollover_target(const Joints &initial, const Joints &pose_a, double elaps
 bool requires_fixstand(Mode mode) {
     switch (mode) {
     case Mode::kWalk:
-    case Mode::kRun:
+    case Mode::kWave:
     case Mode::kForwardJump:
     case Mode::kSit:
     case Mode::kTerrain:
-    case Mode::kWave:
-    case Mode::kRightFlip:
         return true;
     default:
         return false;
     }
 }
 
-Joints action_entry_target(const PolicyAdapter &adapter, Mode mode, const std::vector<Joints> &sit_trajectory) {
+Joints action_entry_target(const PolicyAdapter &adapter, Mode mode, const std::vector<Joints> &trajectory) {
     switch (mode) {
-    case Mode::kWave:
     case Mode::kForwardJump:
+    case Mode::kWave:
+        return adapter.action_to_hardware_targets({}, mode);
     case Mode::kSit:
-        return adapter.action_to_hardware_targets({}, mode, 0.F, sit_trajectory);
+        return adapter.sit_hardware_targets(trajectory, {}, 0.F);
     default:
         return kStandPose;
     }
@@ -203,18 +206,14 @@ const char *mode_name(Mode mode) {
         return "stand";
     case Mode::kWalk:
         return "walk";
-    case Mode::kRun:
-        return "run";
+    case Mode::kWave:
+        return "wave";
     case Mode::kTerrain:
         return "terrain";
     case Mode::kForwardJump:
         return "forward_jump";
     case Mode::kSit:
         return "sit";
-    case Mode::kWave:
-        return "wave";
-    case Mode::kRightFlip:
-        return "right_flip";
     case Mode::kRollover:
         return "rollover";
     }
@@ -229,18 +228,14 @@ Mode parse_mode(const std::string &value) {
         return Mode::kStand;
     if (value == "walk")
         return Mode::kWalk;
-    if (value == "run")
-        return Mode::kRun;
+    if (value == "wave")
+        return Mode::kWave;
     if (value == "terrain")
         return Mode::kTerrain;
     if (value == "forward_jump")
         return Mode::kForwardJump;
     if (value == "sit")
         return Mode::kSit;
-    if (value == "wave")
-        return Mode::kWave;
-    if (value == "right_flip")
-        return Mode::kRightFlip;
     if (value == "rollover")
         return Mode::kRollover;
     if (value == "navigation" || value == "ai_agent")
@@ -256,8 +251,7 @@ Controller::Controller(ControllerConfig config) : config_(std::move(config)) {
                 config_.stand_duration, config_.crouch_pose_duration, config_.crouch_duration,
                 config_.move_linear_acceleration, config_.move_yaw_acceleration, config_.move_linear_deceleration,
                 config_.move_yaw_deceleration,
-                config_.run_linear_acceleration, config_.run_yaw_acceleration, config_.run_linear_deceleration,
-                config_.run_yaw_deceleration, static_cast<double>(config_.maximum_position),
+                static_cast<double>(config_.maximum_position),
                 static_cast<double>(config_.maximum_velocity)}) {
         if (!std::isfinite(value) || value <= 0)
             throw std::invalid_argument("control limits must be finite and positive");
@@ -310,9 +304,9 @@ Controller::Health Controller::motor_health(
     // Skills and running may exceed the ordinary joint-speed limit during their
     // motion or lowering phase. Preserve feedback freshness, finite-value,
     // driver-error and temperature checks throughout these modes.
-    const bool model_velocity_motion = mode_ == Mode::kWave || mode_ == Mode::kForwardJump ||
+    const bool model_velocity_motion = mode_ == Mode::kForwardJump ||
         mode_ == Mode::kSit ||
-        mode_ == Mode::kRightFlip || mode_ == Mode::kRun;
+        mode_ == Mode::kWave;
     bool stale = false, hot = false, position_out_of_range = false;
     for (std::size_t i = 0; i < kNumJoints; ++i) {
         const auto &timed = s.motors.joints[i];
@@ -408,20 +402,17 @@ void Controller::invalidate_policy() {
     inference_fault_.clear();
 }
 void Controller::reset_skill_progress() {
-    policy_frame_ = 0U;
+    sit_exit_start_.reset();
+    sit_exit_stable_since_.reset();
     wave_tick_ = 0U;
     wave_raised_ = true;
+    policy_frame_ = 0U;
     rollover_step_ = 0;
     rollover_step_running_ = false;
 }
 
 void Controller::passive(const std::string &reason) {
     passive_after_exit_ = false;
-    exit_gait_until_.reset();
-    sit_exit_start_.reset();
-    sit_exit_stable_since_.reset();
-    terrain_to_walk_pending_ = false;
-    flip_walk_pending_ = false;
     mode_ = Mode::kPassive;
     pending_mode_.reset();
     protective_ = false;
@@ -460,11 +451,6 @@ void Controller::crouch(const RobotState &s, TimePoint now, std::string reason) 
     velocity_at_ = {};
 }
 void Controller::enter(Mode mode, const RobotState &s, TimePoint now) {
-    exit_gait_until_.reset();
-    sit_exit_start_.reset();
-    sit_exit_stable_since_.reset();
-    terrain_to_walk_pending_ = false;
-    flip_walk_pending_ = false;
     mode_ = mode;
     initial_ = positions(s);
     transition_at_ = policy_at_ = now;
@@ -486,7 +472,7 @@ void Controller::enter(Mode mode, const RobotState &s, TimePoint now) {
     cts_history_initialized_ = false;
 
     reset_skill_progress();
-    if (mode == Mode::kWave || mode == Mode::kSit || mode == Mode::kForwardJump) {
+    if (mode == Mode::kSit || mode == Mode::kForwardJump || mode == Mode::kWave) {
         target_ = config_.policy_adapter->action_to_hardware_targets({}, mode, 0.F, config_.sit_reference);
         target_valid_ = true;
     }
@@ -531,11 +517,10 @@ VelocityCommand Controller::ramp_velocity(VelocityCommand target, TimePoint now)
     const VelocityCommand bounded_target{
         std::clamp(target.vx, spec.vx_lo, spec.vx_hi), std::clamp(target.vy, spec.vy_lo, spec.vy_hi),
         std::clamp(target.yaw, spec.yaw_lo, spec.yaw_hi)};
-    const bool running = mode_ == Mode::kRun;
-    const double linear_acceleration = running ? config_.run_linear_acceleration : config_.move_linear_acceleration;
-    const double linear_deceleration = running ? config_.run_linear_deceleration : config_.move_linear_deceleration;
-    const double yaw_acceleration = running ? config_.run_yaw_acceleration : config_.move_yaw_acceleration;
-    const double yaw_deceleration = running ? config_.run_yaw_deceleration : config_.move_yaw_deceleration;
+    const double linear_acceleration = config_.move_linear_acceleration;
+    const double linear_deceleration = config_.move_linear_deceleration;
+    const double yaw_acceleration = config_.move_yaw_acceleration;
+    const double yaw_deceleration = config_.move_yaw_deceleration;
     if (ramped_velocity_at_ == TimePoint{} || now < ramped_velocity_at_) {
         ramped_velocity_ = {};
         ramped_velocity_at_ = now;
@@ -562,10 +547,9 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
             return {true, "already passive"};
         if (protective_)
             return {true, "crouch already in progress; BRAKE follows"};
-        const bool flip_recovery = mode_ == Mode::kRightFlip;
-        const bool has_exit = mode_ == Mode::kWave ||
-            mode_ == Mode::kSit || mode_ == Mode::kForwardJump || flip_recovery ||
-            mode_ == Mode::kRollover || exit_gait_until_ || flip_walk_pending_;
+        const bool has_exit = mode_ == Mode::kWave || mode_ == Mode::kSit ||
+            mode_ == Mode::kForwardJump ||
+            mode_ == Mode::kRollover;
         if (finish_motion && health == Health::kFresh && imu_fresh(s.imu, now) && !imu_latched_ &&
             (has_exit || passive_after_exit_)) {
             if (passive_after_exit_)
@@ -573,8 +557,7 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
             passive_after_exit_ = true;
             velocity_ = {};
             velocity_at_ = {};
-            if (flip_recovery || mode_ == Mode::kRollover || exit_gait_until_ ||
-                flip_walk_pending_) {
+            if (mode_ == Mode::kRollover) {
                 reason_ = "finishing recovery before crouch and passive";
                 return {true, reason_};
             }
@@ -609,6 +592,13 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
     }
     if (!requesting_passive)
         passive_after_exit_ = false;
+    if (mode_ == Mode::kWave && next != mode_) {
+        pending_mode_ = next;
+        wave_raised_ = false;
+        ++generation_;  // Reject work sampled before the lower-hand request.
+        reason_ = "lowering wave before " + std::string(mode_name(next));
+        return {true, reason_};
+    }
     if (mode_ == Mode::kSit && (next != mode_ || sit_exit_start_)) {
         pending_mode_ = next;
         if (!sit_exit_start_) {
@@ -624,24 +614,12 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
         reason_ = "finishing motion before " + std::string(mode_name(next));
         return {true, reason_};
     }
-    if (mode_ == Mode::kWave && (next == Mode::kStand || passive_after_exit_)) {
-        if (wave_raised_)
-            ++generation_;
-        wave_raised_ = false;
-        reason_ = "lowering wave paw before recovery";
-        return {true, reason_};
-    }
 
     if (next == mode_) {
-        // An explicit same-mode selection cancels the automatic exit sequence.
-
-        exit_gait_until_.reset();
-        terrain_to_walk_pending_ = false;
-        flip_walk_pending_ = false;
-        if (next == Mode::kWave && !wave_raised_) {
-            ++generation_;
+        if (mode_ == Mode::kWave && !wave_raised_) {
             wave_raised_ = true;
-            reason_.clear();
+            pending_mode_.reset();
+            ++generation_;
         }
         return {true, "already in requested mode"};
     }
@@ -652,8 +630,8 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
             last_valid_;
         if (!fixstand_ready) {
             // Queue the requested policy while ensuring the robot first reaches the
-            // fixed standing pose. Wave needs its own nominal stance, so it always
-            // starts a fresh transition; other policies reuse an ongoing FixStand.
+            // fixed standing pose. Reference motions need their own entry pose;
+            // other policies reuse an ongoing FixStand.
             pending_mode_ = next;
             if (mode_ != Mode::kStand || next == Mode::kWave || next == Mode::kSit || next == Mode::kForwardJump)
                 enter(Mode::kStand, s, now);
@@ -703,20 +681,14 @@ ModeResult Controller::step_rollover(const RobotState &s, TimePoint now) {
 
 Commands Controller::tick(const RobotState &s, TimePoint now) {
     std::lock_guard<std::mutex> lock(mutex_);
-    const auto apply_flip_pacing = [this](Commands commands) {
-        const bool paced = !protective_ && mode_ == Mode::kRightFlip;
-        for (auto &command : commands)
-            command.flip_uart_pacing = paced;
-        return commands;
-    };
     // Preserve priority: motor health, completed stand transition, IMU/inference
     // watchdogs, recovery transitions, then the current mode's command.
     if (auto commands = check_motor_state(s, now))
-        return apply_flip_pacing(*commands);
+        return *commands;
     if (auto commands = advance_stand_transition(s, now))
-        return apply_flip_pacing(*commands);
+        return *commands;
     if (auto commands = check_policy_health(s, now))
-        return apply_flip_pacing(*commands);
+        return *commands;
     advance_recovery(s, now);
     if (passive_after_exit_ && !protective_ &&
         ((mode_ == Mode::kStand && !pending_mode_) ||
@@ -724,7 +696,7 @@ Commands Controller::tick(const RobotState &s, TimePoint now) {
                 seconds(now - transition_at_) >= kRolloverSegmentCount * kRolloverSegmentDuration)))) {
         crouch(s, now, "user requested passive");
     }
-    return apply_flip_pacing(mode_commands(s, now));
+    return mode_commands(s, now);
 }
 
 std::optional<Commands> Controller::check_motor_state(const RobotState &s, TimePoint now) {
@@ -779,8 +751,6 @@ std::optional<Commands> Controller::check_motor_state(const RobotState &s, TimeP
         }
         if (!stale_hold_) {
             invalidate_policy();
-            if (mode_ == Mode::kWalk)
-                mode_ = Mode::kStand;
             stale_hold_ = reseed_ = true;
             velocity_ = {};
             velocity_at_ = {};
@@ -810,25 +780,15 @@ std::optional<Commands> Controller::advance_stand_transition(const RobotState &s
     if (!protective_ && pending_mode_ && mode_ == Mode::kStand &&
         seconds(now - transition_at_) >= config_.stand_duration && last_valid_) {
         const Mode next = *pending_mode_;
-        const bool timed_flip_walk = flip_walk_pending_ && next == Mode::kWalk;
         pending_mode_.reset();
         // Emit the completed FixStand target once before the first policy frame;
         // otherwise the new mode would reuse the previous interpolated command
         // for one control tick and visibly stop short of the fixed pose.
-        const Joints final_fixstand_target = next == Mode::kRightFlip
-            ? kStandPose
-            : action_entry_target(*config_.policy_adapter, next, config_.sit_reference);
+        const Joints final_fixstand_target =
+            action_entry_target(*config_.policy_adapter, next, config_.sit_reference);
         const auto final_fixstand = pose_commands(*config_.policy_adapter, final_fixstand_target, false);
         enter(next, s, now);
-        if (timed_flip_walk) {
-            exit_gait_until_ = now + std::chrono::seconds(2);
-            reason_ = "flip recovery; Walk for 2 s before FixStand";
-        }
         return remember(final_fixstand);
-    }
-
-    if (!protective_ && mode_ == Mode::kWave && !wave_raised_ && wave_tick_ == 0U) {
-        enter(Mode::kStand, s, now);
     }
 
     return std::nullopt;
@@ -880,7 +840,7 @@ std::optional<Commands> Controller::check_policy_health(const RobotState &s, Tim
 }
 
 void Controller::check_walking_tilt(const RobotState &s, TimePoint now) {
-    const bool walking = mode_ == Mode::kWalk || mode_ == Mode::kRun || mode_ == Mode::kTerrain;
+    const bool walking = mode_ == Mode::kWalk || mode_ == Mode::kTerrain;
     if (config_.walking_tilt_protection && !protective_ && walking && imu_fresh(s.imu, now) &&
         tilt_exceeds(s.imu, rollover_rad(40.F), rollover_rad(60.F))) {
         crouch(s, now, "walking tilt exceeded |roll| 40 deg or |pitch| 60 deg");
@@ -888,6 +848,8 @@ void Controller::check_walking_tilt(const RobotState &s, TimePoint now) {
 }
 
 void Controller::advance_recovery(const RobotState &s, TimePoint now) {
+    if (!protective_ && mode_ == Mode::kWave && !wave_raised_ && wave_tick_ == 0U)
+        finish_skill(s, now);
     if (!protective_ && mode_ == Mode::kSit && sit_exit_start_) {
         const float elapsed = policy_frame_ * kSkillControlDt - *sit_exit_start_;
         const auto &q = s.imu.six_axis_quaternion;
@@ -916,20 +878,6 @@ void Controller::advance_recovery(const RobotState &s, TimePoint now) {
         }
     }
 
-    if (exit_gait_until_ && !protective_ && (mode_ == Mode::kTerrain || mode_ == Mode::kWalk) &&
-        now >= *exit_gait_until_) {
-        pending_mode_.reset();
-        const bool start_walk = mode_ == Mode::kTerrain && terrain_to_walk_pending_;
-        enter(start_walk ? Mode::kWalk : Mode::kStand, s, now);
-        velocity_ = {};
-        velocity_at_ = {};
-        if (start_walk) {
-            exit_gait_until_ = now + std::chrono::milliseconds(1200);
-            reason_ = "upright exit; Walk for 1.2 s before FixStand";
-        } else {
-            reason_ = "exit gait complete; FixStand";
-        }
-    }
 }
 
 Commands Controller::mode_commands(const RobotState &s, TimePoint now) {
@@ -971,7 +919,7 @@ Commands Controller::mode_commands(const RobotState &s, TimePoint now) {
     }
     if (mode_ == Mode::kRollover) {
         // Keep the action in the active mode until its final Pose A segment has
-        // completed; the next web command (stand/passive/walk) can then take over.
+        // completed; the next web command (stand/passive/terrain) can then take over.
         double elapsed = seconds(now - transition_at_);
         if (rollover_step_ > 0) {
             const double step_elapsed = std::clamp(seconds(now - rollover_step_at_), 0.0, kRolloverSegmentDuration);
@@ -990,7 +938,7 @@ Commands Controller::mode_commands(const RobotState &s, TimePoint now) {
 
         if (mode_ == Mode::kWave || mode_ == Mode::kSit) {
             Commands commands{};
-            const auto torques = config_.policy_adapter->wave_torques(commanded, s, mode_);
+            const auto torques = config_.policy_adapter->policy_torques(commanded, s, mode_);
             for (std::size_t i = 0; i < kNumJoints; ++i) {
                 commands[i].mode = MotorMode::kFoc;
                 commands[i].torque_nm = torques[i];
@@ -1028,7 +976,7 @@ VelocityCommand Controller::policy_command(TimePoint now) {
         return {};
     const bool command_fresh =
         velocity_at_ != TimePoint{} && now >= velocity_at_ && seconds(now - velocity_at_) <= config_.command_timeout;
-    if (command_fresh && (mode_ == Mode::kRun || mode_ == Mode::kWalk || mode_ == Mode::kTerrain))
+    if (command_fresh && (mode_ == Mode::kWalk || mode_ == Mode::kTerrain))
         return ramp_velocity(velocity_, now);
     // A stale producer drops the input to zero and restarts its ramp after reconnecting.
     ramped_velocity_ = {};
@@ -1036,41 +984,22 @@ VelocityCommand Controller::policy_command(TimePoint now) {
     return command_fresh ? velocity_ : VelocityCommand{};
 }
 
-void Controller::begin_flip_recovery(const RobotState &s, TimePoint now) {
-    enter(Mode::kStand, s, now);
-    velocity_ = {};
-    velocity_at_ = {};
-    pending_mode_ = Mode::kWalk;
-    flip_walk_pending_ = true;
-    reason_ = "flip complete; FixStand before Walk";
-}
-
 bool Controller::policy_phase_ready(const RobotState &s, TimePoint now) {
     if (mode_ == Mode::kForwardJump && policy_frame_ >= kForwardJumpFrames) {
         finish_skill(s, now);
         return false;
     }
-    // The ONNX reference has frames 0..118. Finish only after all actions
-    // were accepted; prepare_policy runs on the following policy interval.
-    if (mode_ == Mode::kRightFlip && policy_frame_ >= kRightFlipReferenceFrames) {
-        begin_flip_recovery(s, now);
-        return false;
-    }
-
     return true;
 }
 
 PolicyRequest Controller::prepare_mode_observation(const RobotState &s, VelocityCommand command, TimePoint now) {
-    const float reference_time =
-        mode_ == Mode::kWave ? next_wave_tick(wave_tick_, wave_raised_) * kWaveControlDt : 0.0F;
-    std::vector<float> observation;
-    if (mode_ == Mode::kSit) {
-        observation = config_.policy_adapter->build_sit_observation(config_.sit_reference, s, previous_,
-            (policy_frame_ + 1U) * kSkillControlDt, sit_exit_start_.value_or(std::numeric_limits<float>::infinity()));
-    } else {
-        observation = config_.policy_adapter->build_observation(s, command, previous_, mode_, reference_time);
-    }
-    if (mode_ == Mode::kRun || mode_ == Mode::kTerrain) {
+    const float reference_time = mode_ == Mode::kWave
+        ? next_wave_tick(wave_tick_, wave_raised_) * kSkillControlDt : 0.F;
+    auto observation = mode_ == Mode::kSit
+        ? config_.policy_adapter->build_sit_observation(config_.sit_reference, s, previous_,
+            (policy_frame_ + 1U) * kSkillControlDt, sit_exit_start_.value_or(std::numeric_limits<float>::infinity()))
+        : config_.policy_adapter->build_observation(s, command, previous_, mode_, reference_time);
+    if (mode_ == Mode::kTerrain) {
         update_history<5>(cts_history_, cts_history_initialized_, observation, HistoryOrder::kOldestFirst);
         const auto dims = config_.policy_adapter->observation_term_dimensions(mode_);
         std::vector<float> term_major;
@@ -1087,8 +1016,7 @@ PolicyRequest Controller::prepare_mode_observation(const RobotState &s, Velocity
     }
     const auto request_frame = policy_frame_;
     // Finite/reference motions advance only when an action is accepted.
-    if (mode_ != Mode::kWave && mode_ != Mode::kRightFlip &&
-        mode_ != Mode::kSit && mode_ != Mode::kForwardJump) {
+    if (mode_ != Mode::kWave && mode_ != Mode::kSit && mode_ != Mode::kForwardJump) {
         ++policy_frame_;
     }
     return PolicyRequest{mode_, std::move(observation), s, request_frame, generation_, now};
@@ -1113,17 +1041,14 @@ void Controller::complete_policy(const PolicyRequest &request, const Action &act
             if (clip > 0)
                 value = std::clamp(value, -clip, clip);
         }
-        Joints target{};
-        {
-            const float reference_time =
-                request.mode == Mode::kWave ? next_wave_tick(wave_tick_, wave_raised_) * kWaveControlDt : 0.0F;
-            target = request.mode == Mode::kSit
-                ? config_.policy_adapter->sit_hardware_targets(config_.sit_reference, accepted_action,
-                        (request.policy_frame + 1U) * kSkillControlDt,
-                        sit_exit_start_.value_or(std::numeric_limits<float>::infinity()))
-                : config_.policy_adapter->action_to_hardware_targets(
-                        accepted_action, request.mode, reference_time, {}, variant_index);
-        }
+        const float reference_time = request.mode == Mode::kWave
+            ? next_wave_tick(wave_tick_, wave_raised_) * kSkillControlDt : 0.F;
+        const auto target = request.mode == Mode::kSit
+            ? config_.policy_adapter->sit_hardware_targets(config_.sit_reference, accepted_action,
+                (request.policy_frame + 1U) * kSkillControlDt,
+                sit_exit_start_.value_or(std::numeric_limits<float>::infinity()))
+            : config_.policy_adapter->action_to_hardware_targets(
+                accepted_action, request.mode, reference_time, {}, variant_index);
         target_ = target;
         target_variant_ = variant_index;
         previous_previous_ = previous_;
@@ -1131,11 +1056,9 @@ void Controller::complete_policy(const PolicyRequest &request, const Action &act
         target_valid_ = true;
         policy_at_ = now;
 
-        if (request.mode == Mode::kWave) {
+        if (request.mode == Mode::kWave)
             wave_tick_ = next_wave_tick(wave_tick_, wave_raised_);
-        }
-        if (request.mode == Mode::kWave || request.mode == Mode::kSit || request.mode == Mode::kForwardJump ||
-            request.mode == Mode::kRightFlip) {
+        if (request.mode == Mode::kWave || request.mode == Mode::kSit || request.mode == Mode::kForwardJump) {
             policy_frame_ = std::max(policy_frame_, request.policy_frame + 1U);
         }
     } catch (const std::exception &error) {

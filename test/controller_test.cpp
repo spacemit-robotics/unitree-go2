@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "controller.hpp"
 #include "policy.hpp"
 #include "support.hpp"
@@ -9,9 +13,9 @@ void stand(go2::Controller &c, double start = 1) {
     assert(c.set_mode(go2::Mode::kStand, fresh(start), at(start)).accepted);
     c.tick(fresh(start + 1), at(start + 1));
 }
-void walk(go2::Controller &c) {
+void terrain(go2::Controller &c) {
     stand(c);
-    assert(c.set_mode(go2::Mode::kWalk, fresh(2), at(2)).accepted);
+    assert(c.set_mode(go2::Mode::kTerrain, fresh(2), at(2)).accepted);
 }
 
 void uart_pacing(const go2::Commands &commands, bool expected) {
@@ -47,7 +51,7 @@ int main() {
             auto config = test_controller_config();
             config.walking_tilt_protection = enabled;
             config.crouch_duration = .2;
-            for (const auto mode : {Mode::kWalk, Mode::kRun, Mode::kTerrain}) {
+            for (const auto mode : {Mode::kWalk, Mode::kTerrain}) {
                 for (const auto angles : {std::array<float, 2>{41.F, 0.F}, {-41.F, 0.F},
                         {0.F, 61.F}, {0.F, -61.F}}) {
                     for (bool policy_first : {false, true}) {
@@ -78,16 +82,14 @@ int main() {
         }
         auto config = test_controller_config();
         config.walking_tilt_protection = true;
-        config.sit_reference = go2::load_sit_reference(std::string(GO2_TEST_APP) + "/resources/motions/12.go2_sit.motion");
         for (const float sign : {-1.F, 1.F}) {
             go2::Controller controller(config);
-            const double time = start_mode(controller, Mode::kWalk);
+            const double time = start_mode(controller, Mode::kTerrain);
             controller.tick(tilted_state(time, sign * 39.99F, sign * 59.99F), at(time));
             assert(!controller.status().protective_crouch);
         }
         for (const auto mode : {Mode::kStand, Mode::kCrouch,
-                Mode::kWave, Mode::kForwardJump, Mode::kSit,
-                Mode::kRightFlip}) {
+                Mode::kForwardJump, Mode::kSit}) {
             go2::Controller controller(config);
             const double time = start_mode(controller, mode);
             const auto state = tilted_state(time, 41.F, 61.F);
@@ -123,8 +125,7 @@ int main() {
     {
         // Skill/running speed exemptions do not suppress other motor faults.
         auto config = test_controller_config();
-        config.sit_reference = go2::load_sit_reference(std::string(GO2_TEST_APP) + "/resources/motions/12.go2_sit.motion");
-        for (const auto mode : {Mode::kWave, Mode::kForwardJump, Mode::kSit, Mode::kRightFlip, Mode::kRun}) {
+        for (const auto mode : {Mode::kForwardJump, Mode::kSit, Mode::kWave}) {
             for (unsigned fault = 0; fault < 4; ++fault) {
                 go2::Controller c(config);
                 stand(c);
@@ -143,7 +144,7 @@ int main() {
                         joint.feedback.velocity_rad_s = speed;
                     }
                     uart_pacing(c.tick(state, at(time)),
-                        mode == Mode::kRightFlip);
+                        false);
                     assert(c.status().mode == mode && !c.status().protective_crouch);
                 }
                 time += .001;
@@ -174,21 +175,21 @@ int main() {
         auto state = fresh(2);
         for (auto mode : {Mode::kPassive, Mode::kStand, Mode::kCrouch, Mode::kRollover})
             assert(go2::status_light_state(mode, state, at(2), true).color == StatusLight::kGreen);
-        for (auto mode : {Mode::kWalk, Mode::kRun, Mode::kSit})
+        for (auto mode : {Mode::kTerrain, Mode::kWave, Mode::kSit})
             assert(go2::status_light_state(mode, state, at(2), true).color == StatusLight::kOrange);
         // Repeated transaction errors and one missing motor do not turn the light red.
         state.motors.leg_errors[0] = "reply timeout";
         state.motors.joints[0].valid = false;
-        assert(go2::status_light_state(Mode::kRun, state, at(2), true).color == StatusLight::kOrange);
-        assert(go2::status_light_state(Mode::kRun, state, at(2), false).color == StatusLight::kRed);
+        assert(go2::status_light_state(Mode::kTerrain, state, at(2), true).color == StatusLight::kOrange);
+        assert(go2::status_light_state(Mode::kTerrain, state, at(2), false).color == StatusLight::kRed);
         state.imu.valid = false;
         assert(std::string(go2::status_light_state(Mode::kStand, state, at(2), true).fault) == "imu_no_data");
         state = fresh(2);
         for (auto& joint : state.motors.joints) joint.received_at = at(1);
-        assert(std::string(go2::status_light_state(Mode::kRun, state, at(2), true).fault) == "all_motors_offline");
+        assert(std::string(go2::status_light_state(Mode::kTerrain, state, at(2), true).fault) == "all_motors_offline");
         state = fresh(2);
         state.motors.startup_pose_invalid = true;
-        assert(std::string(go2::status_light_state(Mode::kRun, state, at(2), true).fault) == "startup_pose_invalid");
+        assert(std::string(go2::status_light_state(Mode::kTerrain, state, at(2), true).fault) == "startup_pose_invalid");
     }
     {
         auto config = test_controller_config();
@@ -240,46 +241,9 @@ int main() {
         assert(c.set_mode(Mode::kPassive, state, at(6.02)).accepted);
         assert(c.tick(state, at(8))[0].protective_crouch);
     }
-    for (bool sleep : {false, true}) {
-        // Right flip consumes all 119 reference frames before the common recovery.
-        go2::Controller c(test_controller_config());
-        stand(c);
-        assert(c.set_mode(Mode::kRightFlip, fresh(2), at(2)).accepted);
-        for (unsigned frame = 0; frame < go2::kRightFlipReferenceFrames; ++frame) {
-            const double t = 2.02 + frame * .02;
-            if (sleep && frame == 5U)
-                assert(c.set_mode(Mode::kPassive, fresh(t), at(t), true).accepted);
-            const auto r = c.prepare_policy(fresh(t), at(t));
-            assert(r && r->policy_frame == frame);
-            c.complete_policy(*r, {}, at(t));
-            uart_pacing(c.tick(fresh(t), at(t)), true);
-            assert(c.status().mode == Mode::kRightFlip);
-        }
-        const double end = 2.02 + go2::kRightFlipReferenceFrames * .02;
-        assert(!c.prepare_policy(fresh(end), at(end)));
-        assert(c.status().mode == Mode::kStand);
-        uart_pacing(c.tick(fresh(end + .99), at(end + .99)), false);
-        assert(c.status().mode == Mode::kStand);
-        uart_pacing(c.tick(fresh(end + 1.01), at(end + 1.01)), false);
-        assert(c.status().mode == Mode::kWalk);
-        for (unsigned i = 0; i < 100; ++i) {
-            const double t = end + 1.02 + i * .02;
-            const auto r = c.prepare_policy(fresh(t), at(t));
-            assert(r && r->mode == Mode::kWalk);
-            c.complete_policy(*r, {}, at(t));
-            c.tick(fresh(t), at(t));
-            assert(c.status().mode == Mode::kWalk);
-        }
-        c.tick(fresh(end + 3.02), at(end + 3.02));
-        assert(c.status().mode == Mode::kStand);
-        if (sleep) {
-            assert(c.status().protective_crouch);
-            brake(c.tick(fresh(end + 4.03), at(end + 4.03)));
-            assert(c.status().mode == Mode::kPassive);
-        }
-    }
 
-    for (const auto mode : {Mode::kStand, Mode::kWalk, Mode::kRun, Mode::kTerrain}) {
+
+    for (const auto mode : {Mode::kStand, Mode::kTerrain, Mode::kTerrain}) {
         go2::Controller c(test_controller_config());
         stand(c);
         assert(c.set_mode(mode, fresh(2), at(2)).accepted);
@@ -364,7 +328,7 @@ int main() {
         c.set_velocity({1, 0, 0}, at(1));
         brake(c.tick(fresh(1), at(1)));
         assert(!c.prepare_policy(fresh(1), at(1)));
-        const auto queued = c.set_mode(Mode::kWalk, fresh(1), at(1));
+        const auto queued = c.set_mode(Mode::kTerrain, fresh(1), at(1));
         assert(queued.accepted);
         assert(c.status().mode == Mode::kStand);
         auto bad = fresh(1);
@@ -383,7 +347,7 @@ int main() {
             near(output[i].kp, go2::kStandKp[i]);
             near(output[i].kd, go2::kStandKd[i]);
         }
-        assert(c.set_mode(Mode::kWalk, fresh(1.5), at(1.5)).accepted);
+        assert(c.set_mode(Mode::kTerrain, fresh(1.5), at(1.5)).accepted);
         assert(c.status().mode == Mode::kStand);
         output = c.tick(fresh(2), at(2));
         for (int i = 0; i < 12; ++i)
@@ -397,13 +361,13 @@ int main() {
         // A model request from Passive first enters FixStand, then switches to
         // inference only after the one-second stand transition completes.
         go2::Controller c(test_controller_config());
-        const auto queued = c.set_mode(Mode::kRun, fresh(1), at(1));
+        const auto queued = c.set_mode(Mode::kTerrain, fresh(1), at(1));
         assert(queued.accepted);
         assert(c.status().mode == Mode::kStand);
         c.tick(fresh(1.5), at(1.5));
         assert(c.status().mode == Mode::kStand);
         c.tick(fresh(2.01), at(2.01));
-        assert(c.status().mode == Mode::kRun);
+        assert(c.status().mode == Mode::kTerrain);
     }
 
     {
@@ -458,37 +422,37 @@ int main() {
     }
     {
         go2::Controller c(test_controller_config());
-        walk(c);
+        terrain(c);
         c.set_velocity({.3F, .2F, .1F}, at(2));
         auto request = *c.prepare_policy(fresh(2), at(2));
-        near(request.observation[6], 0);
-        for (int i = 33; i < 45; ++i)
+        near(request.observation[42], 0);
+        for (int i = 213; i < 225; ++i)
             near(request.observation[i], 0);
         go2::Action action{};
         action.fill(.1F);
         c.complete_policy(request, action, at(2.01));
         auto output = c.tick(fresh(2.02), at(2.02));
-        const auto expected = test_adapter().action_to_hardware_targets(action);
+        const auto expected = test_adapter().action_to_hardware_targets(action, Mode::kTerrain);
         for (int i = 0; i < 12; ++i) {
             near(output[i].position_rad, expected[i]);
-            near(output[i].kp, 25);
+            near(output[i].kp, 20);
             near(output[i].kd, .5F);
         }
         auto next = *c.prepare_policy(fresh(2.02), at(2.02));
-        for (int i = 33; i < 45; ++i)
+        for (int i = 213; i < 225; ++i)
             near(next.observation[i], .1F);
         next = *c.prepare_policy(fresh(2.31), at(2.31));
-        near(next.observation[6], 0);
-        near(next.observation[7], 0);
-        near(next.observation[8], 0);
+        near(next.observation[42], 0);
+        near(next.observation[43], 0);
+        near(next.observation[44], 0);
         assert(c.set_mode(Mode::kStand, fresh(2.1), at(2.1)).accepted);
         c.complete_policy(request, action, at(2.11)); // Result from previous mode discarded.
         c.tick(fresh(3.1), at(3.1));
-        assert(c.set_mode(Mode::kWalk, fresh(3.1), at(3.1)).accepted);
-        c.complete_policy(request, action, at(3.11)); // Even after re-entering walk.
+        assert(c.set_mode(Mode::kTerrain, fresh(3.1), at(3.1)).accepted);
+        c.complete_policy(request, action, at(3.11)); // Even after re-entering terrain.
         c.fail_policy(request, "obsolete error");
         next = *c.prepare_policy(fresh(3.11), at(3.11));
-        for (int i = 33; i < 45; ++i)
+        for (int i = 213; i < 225; ++i)
             near(next.observation[i], 0);
         output = c.tick(fresh(3.11), at(3.11));
         near(output[0].kp, 60); // Still standing while waiting for the new inference.
@@ -496,19 +460,17 @@ int main() {
         c.complete_policy(next, action, at(3.12));
         assert(c.set_mode(Mode::kPassive, fresh(3.13), at(3.13)).accepted);
         assert(c.status().protective_crouch);
-        assert(!c.set_mode(Mode::kWalk, fresh(3.14), at(3.14)).accepted);
+        assert(!c.set_mode(Mode::kTerrain, fresh(3.14), at(3.14)).accepted);
         brake(c.tick(fresh(4.14), at(4.14)));
     }
 
     // Check the shared short ramp at each model's real command input.
-    for (const auto mode : {Mode::kWalk, Mode::kTerrain}) {
+    for (const auto mode : {Mode::kTerrain}) {
         go2::Controller c(test_controller_config());
         stand(c);
         assert(c.set_mode(mode, fresh(2), at(2)).accepted);
-        const auto physical_vx = [mode](const go2::PolicyRequest &request) {
-            if (mode == Mode::kTerrain)
-                return request.observation[42] / 2.F;
-            return request.observation[6];
+        const auto physical_vx = [](const go2::PolicyRequest &request) {
+            return request.observation[42] / 2.F;
         };
         c.set_velocity({1.F, .4F, 1.F}, at(2));
         auto request = c.prepare_policy(fresh(2), at(2));
@@ -544,143 +506,16 @@ int main() {
     }
     {
         go2::Controller c(test_controller_config());
-        stand(c);
-        assert(c.set_mode(Mode::kRun, fresh(2), at(2)).accepted);
-        c.set_velocity({4.5F, .4F, 2.F}, at(2));
-        auto first = *c.prepare_policy(fresh(2), at(2));
-        assert(first.policy_frame == 0U);
-        assert(first.observation.size() == 225U);
-        // CTS/FR-Net layout is term-major: each observation term contains its
-        // five chronological samples before the next term begins.
-        for (std::size_t frame = 0; frame < 5U; ++frame) {
-            near(first.observation[frame * 3U + 0U], 0.0F);
-            near(first.observation[30U + frame * 3U + 0U], 0.0F);
-            near(first.observation[30U + frame * 3U + 1U], 0.0F);
-            near(first.observation[30U + frame * 3U + 2U], 0.0F);
-        }
-        auto changed = fresh(2.02);
-        changed.imu.angular_velocity = {4.F, 5.F, 6.F};
-        const auto second = *c.prepare_policy(changed, at(2.02));
-        assert(second.policy_frame == 1U);
-        // The first 20 ms step is acceleration-limited instead of jumping to the
-        // deployed target (3 m/s forward, 0.4 m/s lateral, 2 rad/s yaw).
-        near(second.observation[42U], 0.06F);
-        near(second.observation[43U], 0.06F);
-        near(second.observation[44U], 0.01F);
-        near(second.observation[12], 1.0F);
-        near(second.observation[13], 1.25F);
-        near(second.observation[14], 1.5F);
-        // Releasing a live stick command uses the faster braking slope toward zero.
-        // The policy sees a smaller, still nonzero command on the next frame.
-        const auto accelerating = *c.prepare_policy(fresh(2.12), at(2.12));
-        near(accelerating.observation[42U], 0.36F);
-        near(accelerating.observation[43U], 0.36F);
-        near(accelerating.observation[44U], 0.06F);
-        c.set_velocity({}, at(2.12));
-        const auto releasing = *c.prepare_policy(fresh(2.14), at(2.14));
-        near(releasing.observation[42U], 0.26F);
-        near(releasing.observation[43U], 0.26F);
-        near(releasing.observation[44U], 0.045F);
-        const auto stopped = *c.prepare_policy(fresh(2.24), at(2.24));
-        near(stopped.observation[42U], 0.0F);
-        near(stopped.observation[43U], 0.0F);
-        near(stopped.observation[44U], 0.0F);
-    }
-    {
-        go2::Controller c(test_controller_config());
-        stand(c);
-        assert(c.set_mode(Mode::kRun, fresh(2), at(2)).accepted);
-        c.set_velocity({4.5F, 0.0F, 0.0F}, at(2));
-        assert(c.prepare_policy(fresh(2), at(2)));
-        assert(c.prepare_policy(fresh(2.02), at(2.02)));
-        assert(c.prepare_policy(fresh(2.12), at(2.12)));
-        c.set_velocity({-2.0F, 0.0F, 0.0F}, at(2.12));
-        const auto braking = *c.prepare_policy(fresh(2.14), at(2.14));
-        near(braking.observation[42U], 0.26F);
-        const auto zero = *c.prepare_policy(fresh(2.20), at(2.20));
-        near(zero.observation[42U], 0.0F);
-        const auto reversing = *c.prepare_policy(fresh(2.22), at(2.22));
-        near(reversing.observation[42U], -0.06F);
-    }
-    for (float direction : {-1.F, 1.F}) {
-        go2::Controller c(test_controller_config());
-        stand(c);
-        assert(c.set_mode(Mode::kRun, fresh(2), at(2)).accepted);
-        for (unsigned frame = 0; frame <= 200; ++frame) {
-            const double time = 2 + frame * .02;
-            c.set_velocity({direction * 10.F, direction * 10.F, direction * 10.F}, at(time));
-            const auto request = c.prepare_policy(fresh(time), at(time));
-            assert(request);
-            if (frame == 200) {
-                near(request->observation[42U], direction > 0 ? 6.F : -4.F);
-                near(request->observation[43U], direction * 1.F);
-                near(request->observation[44U], direction * .5F);
-            }
-        }
-    }
-    for (bool sleep : {false, true}) {
-        go2::Controller c(test_controller_config());
-        stand(c);
-        assert(c.set_mode(Mode::kWave, fresh(2), at(2)).accepted);
-        assert(c.status().mode == Mode::kStand);
-        assert(!c.prepare_policy(fresh(2.5), at(2.5)));
-        c.tick(fresh(2.5), at(2.5));
-        const auto nominal = test_adapter().action_to_hardware_targets({}, Mode::kWave);
-        auto output = c.tick(fresh(3, nominal), at(3));
-        assert(c.status().mode == Mode::kWave);
-        for (std::size_t i = 0; i < 12U; ++i)
-            near(output[i].position_rad, nominal[i]);
-        double time = 3.0;
-        for (unsigned frame = 0; frame < 400U; ++frame, time += .02) {
-            const auto state = fresh(time, nominal);
-            auto request = *c.prepare_policy(state, at(time));
-            assert(request.observation.size() == 56U);
-            c.complete_policy(request, {}, at(time));
-            output = c.tick(state, at(time));
-            assert(c.status().mode == Mode::kWave);
-            for (const auto &command : output) {
-                near(command.kp, 0.0F);
-                near(command.kd, 0.0F);
-                assert(std::fabs(command.torque_nm) <= 23.5F);
-                assert(!command.backflip_control);
-            }
-        }
-        const auto stale = *c.prepare_policy(fresh(time, nominal), at(time));
-        assert(c.set_mode(sleep ? Mode::kPassive : Mode::kStand, fresh(time, nominal), at(time), true).accepted);
-        assert(c.status().mode == Mode::kWave);
-        go2::Action invalid{};
-        invalid.fill(std::numeric_limits<float>::infinity());
-        c.complete_policy(stale, invalid, at(time));
-        unsigned lowering_frames = 0U;
-        while (c.status().mode == Mode::kWave && lowering_frames++ < 200U) {
-            time += .02;
-            const auto state = fresh(time, nominal);
-            const auto request = *c.prepare_policy(state, at(time));
-            c.complete_policy(request, {}, at(time));
-            c.tick(state, at(time));
-            if (c.status().mode == Mode::kWave)
-                assert(!c.status().protective_crouch);
-        }
-        assert(c.status().mode == Mode::kStand);
-        assert(lowering_frames < 200U);
-        if (sleep) {
-            assert(c.status().protective_crouch);
-            brake(c.tick(fresh(time + 1.01, nominal), at(time + 1.01)));
-            assert(c.status().mode == Mode::kPassive);
-        }
-    }
-    {
-        go2::Controller c(test_controller_config());
-        walk(c);
+        terrain(c);
         const auto old = *c.prepare_policy(fresh(2), at(2));
         auto s = fresh(2.1);
         s.motors.joints[0].received_at = at(1.85);
         auto held = c.tick(s, at(2.1));
         assert(held[0].mode == go2::MotorMode::kFoc);
-        assert(c.status().mode == Mode::kStand);
+        assert(c.status().mode == Mode::kTerrain);
         c.complete_policy(old, {}, at(2.12));
         c.tick(fresh(2.12), at(2.12));
-        assert(c.set_mode(Mode::kWalk, fresh(2.13), at(2.13)).accepted); // Reseeded stand; queue FixStand.
+        assert(c.set_mode(Mode::kTerrain, fresh(2.13), at(2.13)).accepted); // Reseeded stand; queue FixStand.
         s = fresh(2.2);
         s.motors.joints[0].received_at = at(1.89);
         s.imu.received_at = at(1.95); // Motor hard fault must win over IMU soft hold.
@@ -799,7 +634,7 @@ int main() {
     }
     for (int fault = 0; fault < 4; ++fault) {
         go2::Controller c(test_controller_config());
-        walk(c);
+        terrain(c);
         const auto request = *c.prepare_policy(fresh(2), at(2));
         if (fault == 0)
             c.fail_policy(request, "inference failed");
@@ -913,20 +748,21 @@ int main() {
     assert(go2::parse_mode("navigation") == Mode::kWalk);
     assert(go2::parse_mode("ai_agent") == Mode::kWalk);
     rejects([] { go2::parse_mode("dance"); });
-    rejects([] { go2::parse_mode("heart"); });
     assert(go2::parse_mode("rollover") == Mode::kRollover);
     assert(go2::parse_mode("crouch") == Mode::kCrouch);
     assert(go2::parse_mode("walk") == Mode::kWalk);
     rejects([] { go2::parse_mode("free_walk"); });
     rejects([] { go2::parse_mode("cross_step"); });
-    assert(go2::parse_mode("run") == Mode::kRun);
+    assert(go2::parse_mode("wave") == Mode::kWave);
+    assert(go2::parse_mode("sit") == Mode::kSit);
+    rejects([] { go2::parse_mode("run"); });
     assert(go2::parse_mode("terrain") == Mode::kTerrain);
     rejects([] { go2::parse_mode("b_v2_stand"); });
-    assert(go2::parse_mode("right_flip") == Mode::kRightFlip);
+    rejects([] { go2::parse_mode("right_flip"); });
+    rejects([] { go2::parse_mode("heart"); });
     rejects([] { go2::parse_mode("left_flip"); });
     rejects([] { go2::parse_mode("handstand"); });
     rejects([] { go2::parse_mode("leggedstand"); });
-    assert(go2::parse_mode("wave") == Mode::kWave);
     rejects([] { go2::parse_mode("jump"); });
     rejects([] { go2::parse_mode("spring_jump"); });
     rejects([] { go2::parse_mode("pose_a"); });

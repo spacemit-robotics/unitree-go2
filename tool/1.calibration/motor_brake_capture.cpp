@@ -1,3 +1,8 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
+#include <cerrno>
 #include <charconv>
 #include <chrono>
 #include <cmath>
@@ -30,17 +35,36 @@ int main(int argc, char** argv) {
     int result = motor_init_one(dev);
     motor_cmd command{};
     command.mode = MOTOR_MODE_IDLE;
+    std::uint64_t previous_timestamp = 0;
     std::cout << std::setprecision(9);
     for (int sample = 0; result == 0 && sample < samples; ++sample) {
         motor_state state{};
         std::uint8_t feedback_id = 255;
-        if (motor_set_cmd_one(dev, &command) < 0 || motor_get_state_one(dev, &state) < 0 ||
-            motor_get_paras(dev, "feedback_id", &feedback_id, sizeof(feedback_id)) < 0 || feedback_id != id ||
-            state.err != 0 || !std::isfinite(state.pos) || !std::isfinite(state.vel) || !std::isfinite(state.trq)) {
-            std::cerr << "Invalid/missing BRAKE feedback for motor " << id << '\n';
+        int send_result = 0;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            send_result = motor_set_cmd_one(dev, &command);
+            if (sample != 0 || send_result != -ETIMEDOUT || attempt == 3) break;
+            std::cerr << "Initial BRAKE request timed out for motor " << id
+                        << "; retry " << attempt + 1 << "/3\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+        const int state_result = motor_get_state_one(dev, &state);
+        const int id_result = motor_get_paras(dev, "feedback_id", &feedback_id, sizeof(feedback_id));
+        std::uint64_t timestamp = 0;
+        const int timestamp_result = motor_get_feedback_timestamp_one(dev, &timestamp);
+        if (send_result < 0 || state_result < 0 || id_result < 0 || feedback_id != id || state.err != 0 ||
+            timestamp_result < 0 || timestamp <= previous_timestamp ||
+            !std::isfinite(state.pos) || !std::isfinite(state.vel) || !std::isfinite(state.trq)) {
+            std::cerr << "Invalid/missing BRAKE feedback: port=" << argv[1] << " motor=" << id
+                        << " sample=" << sample << " send_rc=" << send_result << " state_rc=" << state_result
+                        << " id_rc=" << id_result << " feedback_id=" << static_cast<unsigned>(feedback_id)
+                        << " error=" << state.err << " timestamp_rc=" << timestamp_result
+                        << " timestamp_us=" << timestamp << " previous_timestamp_us=" << previous_timestamp
+                        << " q=" << state.pos << " dq=" << state.vel << " tau=" << state.trq << '\n';
             result = -1;
             break;
         }
+        previous_timestamp = timestamp;
         std::cout << "reply id=" << static_cast<unsigned>(feedback_id) << " temp=" << state.temp
                     << " error=" << state.err << " q=" << state.pos << " dq=" << state.vel << " tau=" << state.trq
                     << '\n';

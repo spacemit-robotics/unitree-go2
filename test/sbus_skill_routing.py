@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Exercise model selection, G pose holds and emergency priority through a real SBUS PTY.
 
 Run on K3 after sourcing output/staging/setup.bash. The service only records
@@ -27,11 +30,11 @@ def main():
     rclpy.init()
     node = rclpy.create_node('sbus_skill_routing_test')
     received = []
-    reject_walk = False
+    reject_terrain = False
 
     def request(req, response):
         received.append(req.mode)
-        response.accepted = not (reject_walk and req.mode == 'walk')
+        response.accepted = not (reject_terrain and req.mode == 'terrain')
         response.message = 'recorded without actuation'
         return response
 
@@ -67,7 +70,7 @@ def main():
     assert guard.is_file()
     with tempfile.TemporaryFile(mode='w+') as log:
         process = subprocess.Popen([str(args.binary or args.root / 'output/staging/lib/unitree_go2/sbus_teleop_node'),
-            '--ros-args', '-p', 'device:=' + os.ttyname(slave), '-p', 'bright_modes_enabled:=true'],
+            '--ros-args', '-p', 'device:=' + os.ttyname(slave)],
             env=dict(os.environ, LD_PRELOAD=str(guard)), stdout=log, stderr=subprocess.STDOUT,
             start_new_session=True)
         feeder = threading.Thread(target=feed, daemon=True)
@@ -82,9 +85,12 @@ def main():
             assert not light_requests, light_requests
             # B/F/E select the model; each C edge sends one request.
             for b, f, e, expected in (
+                (282, 282, 282, 'terrain'),
+                (282, 282, 1002, 'wave'),
+                (282, 1722, 1002, None),
+                (282, 1722, 282, 'forward_jump'),
+                (282, 282, 1722, 'sit'),
                 (282, 1722, 1722, 'walk'),
-                (282, 1722, 1002, 'forward_jump'),
-                (1722, 282, 1722, 'sit'),
                 (1722, 1002, 1722, None),  # Slot 15 is empty.
             ):
                 before = len(received)
@@ -94,22 +100,22 @@ def main():
                 spin(1.2)
                 assert received[before:] == ([] if expected is None else [expected]), received
             # A rejected request must remain retryable on the next C edge.
-            reject_walk = True
+            reject_terrain = True
             with lock:
-                channels[7], channels[5], channels[4], channels[11] = 282, 1722, 1722, 1002
+                channels[7], channels[5], channels[4], channels[11] = 282, 282, 282, 1002
             spin(.2)
             for _ in range(2):
                 before = len(received)
                 with lock:
                     channels[8] = 282 if channels[8] == 1722 else 1722
                 spin(1.2)
-                assert received[before:] == ['walk'], received
-            reject_walk = False
+                assert received[before:] == ['terrain'], received
+            reject_terrain = False
             before = len(received)
             with lock:
                 channels[8] = 282 if channels[8] == 1722 else 1722
             spin(1.2)
-            assert received[before:] == ['walk'], received
+            assert received[before:] == ['terrain'], received
             # G holds remain independent of the reserved A button.
             before = len(received)
             with lock:

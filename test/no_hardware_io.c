@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 // Test-only LD_PRELOAD tripwire. Abort BEFORE a physical serial open occurs.
 // Pseudo-terminals (/dev/pts/*) are allowed for protocol integration tests.
 #define _GNU_SOURCE

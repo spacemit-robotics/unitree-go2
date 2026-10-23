@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Download and verify the Go2 models listed in config/model_manifest.yaml."""
 
 import argparse
@@ -34,6 +37,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--base-url", help="Override the model archive URL")
     parser.add_argument("--output", type=Path, help="Model directory; default: this application's policy/")
+    parser.add_argument("--training-repo", type=Path, help="Local checkout containing self-trained model archives")
     parser.add_argument("--check", action="store_true", help="Verify local files without downloading")
     args = parser.parse_args()
     root = application_root()
@@ -52,6 +56,16 @@ def main():
             missing.append(name)
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
+        if entry.get("training_path") and args.training_repo is not None:
+            relative_source = PurePosixPath(entry["training_path"])
+            if relative_source.is_absolute() or ".." in relative_source.parts:
+                raise ValueError(f"Invalid training asset path: {relative_source}")
+            source = args.training_repo / relative_source
+            if not matches(source, entry):
+                raise ValueError(f"Missing or invalid training archive: {source}")
+            shutil.copyfile(source, target)
+            print(f"Copied {name} from training archive", flush=True)
+            continue
         temporary = target.with_name(target.name + ".part")
         print(f"Downloading {name}", flush=True)
         try:

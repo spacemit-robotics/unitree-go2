@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Evaluate launch actions without executing or opening any hardware."""
 
 import importlib.util
@@ -53,8 +56,6 @@ def resolve(include_config=False, include_domain=False, **overrides):
 
 
 legacy = resolve()
-assert legacy[1]["bright_modes_enabled"] is False
-assert resolve(sbus_bright_modes_enabled="true")[1]["bright_modes_enabled"] is True
 assert legacy[0]["walking_tilt_protection"] is True
 assert resolve(walking_tilt_protection="false")[0]["walking_tilt_protection"] is False
 assert legacy[-1]["ap_band"] == "a" and legacy[-1]["ap_channel"] == 0
@@ -68,27 +69,6 @@ assert resolve(fpv_control_enabled="true")[-1]["fpv_control_enabled"] is True
 assert "fpv_mode" not in legacy[-1]
 assert "fpv_script" not in legacy[-1]
 assert "fpv_autostart" not in legacy[-1]
-
-# Explicit launch arguments override local YAML, which overrides shared YAML.
-ramp_keys = ("run_linear_acceleration_mps2", "run_yaw_acceleration_rad_s2",
-             "run_linear_deceleration_mps2", "run_yaw_deceleration_rad_s2")
-with tempfile.TemporaryDirectory() as temporary:
-    base_path = Path(temporary) / "base.yaml"
-    local_path = Path(temporary) / "robot.yaml"
-    shared = dict(zip(ramp_keys, (2.1, 2.2, 2.3, 2.4)))
-    site = dict(zip(ramp_keys, (0.6, 0.7, 1.8, 2.2)))
-    base_path.write_text(yaml.safe_dump({"go2": {"ros__parameters": shared}}))
-    base_node = resolve(include_config=True, config=str(base_path))[0]
-    assert all(base_node[key] == value for key, value in shared.items())
-    local_path.write_text(yaml.safe_dump({"go2": {"ros__parameters": site}}))
-    local_node = resolve(include_config=True, config=str(base_path), local_config=str(local_path))[0]
-    assert all(local_node[key] == value for key, value in site.items())
-    explicit = resolve(include_config=True, config=str(base_path), local_config=str(local_path),
-                       run_linear_acceleration_mps2="0.9", run_yaw_acceleration_rad_s2="1.1")[0]
-    assert explicit[ramp_keys[0]] == 0.9 and explicit[ramp_keys[1]] == 1.1
-    assert all(explicit[key] == site[key] for key in ramp_keys[2:])
-defaults = resolve(include_config=True)[0]
-assert [defaults[key] for key in ramp_keys] == [1.5, 2.0, 2.5, 3.0]
 
 # Temporary synthetic board profiles exercise identity and calibration isolation.
 with tempfile.TemporaryDirectory() as temporary:

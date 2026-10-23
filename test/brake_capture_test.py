@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Exercise the real motor driver over a PTY, without hardware."""
 import os
 import pty
@@ -17,13 +20,13 @@ def crc(data):
     return value
 
 
-def exercise(tool, error=0, corrupt=False):
+def exercise(tool, error=0, corrupt=False, initial_timeouts=0):
     master, slave = pty.openpty()
     child = subprocess.Popen([tool, os.ttyname(slave), "1", "20"],
                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
-        count = 1 if error or corrupt else 20
-        for _ in range(count):
+        count = 4 if initial_timeouts == 4 else (1 if error or corrupt else 20) + initial_timeouts
+        for request in range(count):
             command = b""
             while len(command) < 17:
                 assert select.select([master], [], [], 2)[0], "BRAKE request timed out"
@@ -31,16 +34,21 @@ def exercise(tool, error=0, corrupt=False):
             assert command[:3] == b"\xfe\xee\x01", command
             assert command[3:15] == bytes(12), "nonzero torque/position/gains"
             assert struct.unpack("<H", command[15:])[0] == crc(command[:15])
+            if request < initial_timeouts:
+                continue
             frame = b"\xfd\xee\x01" + struct.pack("<hhiBH", 0, 0, 32768, 30, error)
             frame += struct.pack("<H", crc(frame) ^ int(corrupt))
             os.write(master, frame)
         stdout, stderr = child.communicate(timeout=3)
-        if error or corrupt:
+        if error or corrupt or initial_timeouts == 4:
             assert child.returncode != 0, (stdout, stderr)
+            assert "send_rc=" in stderr and "feedback_id=" in stderr, stderr
         else:
             assert child.returncode == 0, (stdout, stderr)
             assert stdout.count("reply id=1") == 20
             assert "valid replies: 20/20" in stdout
+            if initial_timeouts:
+                assert stderr.count("retry ") == initial_timeouts, stderr
     finally:
         if child.poll() is None:
             child.kill()
@@ -52,6 +60,8 @@ def exercise(tool, error=0, corrupt=False):
 if __name__ == "__main__":
     for error, corrupt in ((0, False), (1, False), (0, True)):
         exercise(sys.argv[1], error, corrupt)
+    exercise(sys.argv[1], initial_timeouts=2)
+    exercise(sys.argv[1], initial_timeouts=4)
     invalid = subprocess.run([sys.argv[1], "/dev/not-opened", "1junk", "20"], capture_output=True)
     assert invalid.returncode == 2
-    print("PASS: BRAKE-only wire frames, valid feedback, motor error, CRC rejection, argument validation")
+    print("PASS: BRAKE-only frames, valid feedback, bounded startup retries, motor error, CRC and argument validation")

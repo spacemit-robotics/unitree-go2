@@ -1,0 +1,43 @@
+SpacemiT unitree_go2 Component
+Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+
+This product includes software developed at
+SpacemiT (Hangzhou) Technology Co. Ltd. (https://www.spacemit.com/).
+
+---------------------------------------------------------------------------
+Third-party Model Notices:
+---------------------------------------------------------------------------
+
+1. go2_rl_gym (https://github.com/wty-yy/go2_rl_gym)
+   Copyright (c) 2025 Wu Tianyang
+   Licensed under the MIT License.
+
+   The third-party policy 2.go2_terrain.onnx is distributed by the author via
+   unitree_cpp_deploy (https://github.com/wty-yy/unitree_cpp_deploy),
+   Copyright (c) 2025 wty, and the MIT-licensed model release at
+   https://huggingface.co/wty-yy/go2_rl_gym_data.
+   The ONNX file is renamed without modifying its contents.
+
+   Original license and copyright notices are retained verbatim in:
+   LICENSES/wty-yy-go2-rl-gym.txt
+   LICENSES/wty-yy-unitree-cpp-deploy.txt
+
+---------------------------------------------------------------------------
+Project-trained Models:
+---------------------------------------------------------------------------
+
+The project-trained policies 1.go2_blind_rough.onnx, 10.go2_wave.onnx,
+11.go2_forward_jump.onnx and 12.go2_sit.onnx are released under the
+Apache License 2.0 in LICENSE. Training framework licenses do not replace
+the license declaration for these weights.
+
+See MODEL_SOURCES.md and config/model_manifest.yaml for model provenance,
+versions and checksums. Provide these notices and the license texts with
+the SDK when distributing the separately packaged model files.
+
+---------------------------------------------------------------------------
+Additional Attributions:
+---------------------------------------------------------------------------
+
+This product uses components of the ROS 2 project (https://www.ros.org/).
+Copyright (c) 2014-2026 Open Source Robotics Foundation, Inc.

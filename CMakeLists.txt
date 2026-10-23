@@ -71,7 +71,8 @@ install(FILES tool/1.calibration/calibration_pose_e.yaml
         tool/1.calibration/CALIBRATION.md
         DESTINATION share/${PROJECT_NAME}/tool/1.calibration)
 install(DIRECTORY tool/1.calibration/assets DESTINATION share/${PROJECT_NAME}/tool/1.calibration)
-install(FILES README.md DESTINATION share/${PROJECT_NAME})
+install(FILES README.md MODEL_SOURCES.md LICENSE NOTICE DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY LICENSES DESTINATION share/${PROJECT_NAME})
 if(BUILD_TESTING)
   set(GO2_TEST_MODEL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/policy" CACHE PATH "Go2 test model assets")
   # The transport regression creates fake driver objects using motor's internal

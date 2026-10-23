@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """PC/K3 software acceptance: mock motor control.
 
 Requires the test-only no_hardware_io library. Never uses physical devices.
@@ -121,19 +124,27 @@ def main():
         for service_name in ("/go2/set_mode", "/go2/set_mode_rc", "/go2/set_mode_web"):
             request_client = node.create_client(SetMode, service_name)
             assert request_client.wait_for_service(timeout_sec=5)
-            request = SetMode.Request()
-            request.mode = "heart"
-            future = request_client.call_async(request)
-            rclpy.spin_until_future_complete(node, future, timeout_sec=5)
-            assert future.done(), service_name
-            result = future.result()
-            assert not result.accepted, (service_name, result.message)
-            spin(.1)
-            assert json.loads(statuses[-1].data)["mode"] == "passive"
+            for removed_mode in ("run", "heart", "right_flip"):
+                request = SetMode.Request()
+                request.mode = removed_mode
+                future = request_client.call_async(request)
+                rclpy.spin_until_future_complete(node, future, timeout_sec=5)
+                assert future.done(), service_name
+                result = future.result()
+                assert not result.accepted, (service_name, result.message)
+                spin(.1)
+                assert json.loads(statuses[-1].data)["mode"] == "passive"
             node.destroy_client(request_client)
         spin(.2)
         queued_walk = mode("walk")
         assert queued_walk.accepted and "FixStand" in queued_walk.message
+        spin(1.4)
+        assert json.loads(statuses[-1].data)["mode"] == "walk"
+        assert mode("passive").accepted
+        spin(2.3)
+        assert json.loads(statuses[-1].data)["mode"] == "passive"
+        queued_terrain = mode("terrain")
+        assert queued_terrain.accepted and "FixStand" in queued_terrain.message
         assert not mode("invalid").accepted
         assert not mode("free_avoid").accepted
         assert mode("stand").accepted
@@ -147,7 +158,7 @@ def main():
         assert joints[-1].name[0] == "FR_hip_joint" and body_imu[-1].header.frame_id == "go2_body_imu"
         assert not mode("isaacgym_handstand").accepted
         assert not mode("jump").accepted
-        assert mode("walk").accepted
+        assert mode("terrain").accepted
         spin(.3)
         # Exercise mutually exclusive RC/navigation forwarding, including data
         # remaining observable on RC while navigation owns the controller.
@@ -165,12 +176,12 @@ def main():
         ai_velocity = Twist()
         ai_velocity.linear.x = .317
         assert not mode("follow").accepted
-        for selected, expected in (("walk", .4), ("navigation", .2), ("ai_agent", .317), ("walk", .4)):
+        for selected, expected in (("terrain", .4), ("navigation", .2), ("ai_agent", .317), ("terrain", .4)):
             result = mode(selected)
             assert result.accepted
             spin(1.3 if "FixStand" in result.message else .15)
             state = json.loads(statuses[-1].data)
-            assert state["mode"] == "walk", state
+            assert state["mode"] == ("walk" if selected in ("navigation", "ai_agent") else "terrain"), state
             forwarded.clear()
             observed_rc.clear()
             for _ in range(5):
@@ -191,7 +202,7 @@ def main():
         rc_command.publish(rc_velocity)
         spin(.1)
         assert not forwarded, "rejected mode request changed RC routing"
-        assert mode("walk").accepted
+        assert mode("terrain").accepted
         spin(.15)
         forwarded.clear()
         rc_velocity.linear.x = float("nan")
@@ -206,7 +217,7 @@ def main():
         channels = [1002] * 16
         channels[2] = 1362  # Forward stick, half scale.
         channels[7] = channels[8] = 282
-        channels[4] = channels[5] = 1722  # Slot 9: flat ONNX.
+        channels[4] = channels[5] = 282  # Slot 1: terrain ONNX.
         frame_lock = threading.Lock()
         feed_stop = threading.Event()
 
@@ -225,7 +236,7 @@ def main():
             spin(.6)
             assert sbus.poll() is None
             with frame_lock:
-                channels[8] = 1722  # C edge selects walk.
+                channels[8] = 1722  # C edge selects terrain.
             spin(.5)
             observed_rc.clear()
             forwarded.clear()
@@ -251,6 +262,14 @@ def main():
             assert observed_rc and all(v.linear.x > .4 for v in observed_rc)
             assert forwarded and all(abs(v.linear.x - .2) < 1e-6 for v in forwarded)
             with frame_lock:
+                channels[0] = channels[3] = 1722
+            spin(.2)
+            observed_rc.clear()
+            spin(.2)
+            assert observed_rc and all(abs(abs(v.linear.y) - .4) < 1e-6 for v in observed_rc)
+            assert all(abs(abs(v.angular.z) - 1.) < 1e-6 for v in observed_rc)
+            with frame_lock:
+                channels[0] = channels[3] = 1002
                 channels[2] = 642  # Live direction change during navigation.
             spin(.1)
             observed_rc.clear()
@@ -259,8 +278,8 @@ def main():
             assert observed_rc and all(v.linear.x < -.4 for v in observed_rc)
             assert not forwarded, "SBUS guidance controlled robot during navigation"
             with frame_lock:
-                channels[4] = channels[5] = 1722
-                channels[8] = 1722  # Back to walk.
+                channels[4] = channels[5] = 282
+                channels[8] = 1722  # Back to terrain.
             spin(.4)
             forwarded.clear()
             spin(.2)
@@ -390,7 +409,7 @@ def main():
         channels = [1002] * 16
         channels[2] = 1362
         channels[7] = channels[8] = 282
-        channels[4] = channels[5] = 1722  # Slot 9: flat ONNX.
+        channels[4] = channels[5] = 282  # Slot 1: terrain ONNX.
         frame_lock = threading.Lock()
         feed_stop = threading.Event()
         feed_paused, frame_flags = True, 0
@@ -433,7 +452,7 @@ def main():
             with frame_lock:
                 channels[8] = 1722
             spin(1.5)
-            assert json.loads(statuses[-1].data)["mode"] == "walk"
+            assert json.loads(statuses[-1].data)["mode"] == "terrain"
             forwarded.clear()
             assert not web_request(shared_port, {"axes": [.831, 0, 0]})["accepted"]
             spin(.2)
@@ -443,7 +462,7 @@ def main():
                 feed_paused = True
             spin(.45)
             state = json.loads(statuses[-1].data)
-            assert state["control_source"] == "sbus" and state["mode"] == "walk", state
+            assert state["control_source"] == "sbus" and state["mode"] == "terrain", state
             assert abs(forwarded[-1].linear.x) < 1e-6, "stale sticks were not zeroed"
             with frame_lock:
                 feed_paused = False
@@ -492,7 +511,7 @@ def main():
             assert web_request(shared_port)["control_source"] == "sbus", "leaving slot 4 did not restore RC"
             with frame_lock:
                 channels[8] = 1722
-            spin(1.3)  # Navigation enters Walk after FixStand.
+            spin(1.3)  # Navigation enters flat walking after FixStand.
             state = json.loads(statuses[-1].data)
             assert state["sbus_slot"] == 5 and state["navigation_enabled"] and not state["ai_agent_enabled"], state
             assert state["mode"] == "walk", state

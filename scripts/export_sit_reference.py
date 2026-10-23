@@ -1,3 +1,6 @@
+# Copyright 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+#
+# SPDX-License-Identifier: Apache-2.0
 """Export the sit training NPZ to the shared GO2_MOTION_V1 format."""
 import argparse
 from pathlib import Path

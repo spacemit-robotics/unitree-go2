@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "node.hpp"
 
 #include <algorithm>
@@ -27,15 +31,11 @@ const char* mode_display(Mode mode) {
         case Mode::kStand:
             return "站立";
         case Mode::kWalk:
-            return "平地行走";
-        case Mode::kRun:
-            return "跑步";
-        case Mode::kTerrain:
-            return "地形";
+            return "行走";
         case Mode::kWave:
             return "招手";
-        case Mode::kRightFlip:
-            return "右空翻";
+        case Mode::kTerrain:
+            return "地形";
         case Mode::kRollover:
             return "倒地自起";
     }
@@ -164,10 +164,6 @@ Node::Node() : rclcpp::Node("go2") {
     c.move_yaw_acceleration = parameter(*this, "move_yaw_acceleration_rad_s2", c.move_yaw_acceleration);
     c.move_linear_deceleration = parameter(*this, "move_linear_deceleration_mps2", c.move_linear_deceleration);
     c.move_yaw_deceleration = parameter(*this, "move_yaw_deceleration_rad_s2", c.move_yaw_deceleration);
-    c.run_linear_acceleration = parameter(*this, "run_linear_acceleration_mps2", c.run_linear_acceleration);
-    c.run_yaw_acceleration = parameter(*this, "run_yaw_acceleration_rad_s2", c.run_yaw_acceleration);
-    c.run_linear_deceleration = parameter(*this, "run_linear_deceleration_mps2", c.run_linear_deceleration);
-    c.run_yaw_deceleration = parameter(*this, "run_yaw_deceleration_rad_s2", c.run_yaw_deceleration);
     c.maximum_temperature = parameter(*this, "maximum_motor_temperature_c", c.maximum_temperature);
     c.maximum_position =
         parameter(*this, "maximum_absolute_joint_position_rad", static_cast<double>(c.maximum_position));
@@ -207,8 +203,8 @@ Node::Node() : rclcpp::Node("go2") {
     const auto share = ament_index_cpp::get_package_share_directory("unitree_go2");
     const auto model_path = parameter(*this, "model_path", share + "/policy");
     const auto policy_config = parameter(*this, "policy_config", share + "/config/policies.yaml");
-    c.policy_adapter = std::make_shared<PolicyAdapter>(policy_config, model_path);
     c.sit_reference = load_sit_reference(share + "/resources/motions/12.go2_sit.motion");
+    c.policy_adapter = std::make_shared<PolicyAdapter>(policy_config, model_path);
     controller_ = std::make_unique<Controller>(c);
     hardware_ = std::make_unique<Hardware>(h);
     input_source_ = parameter(*this, "teleop_source", std::string("none"));

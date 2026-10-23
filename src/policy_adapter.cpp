@@ -1,3 +1,7 @@
+/*
+ * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
+ * SPDX-License-Identifier: Apache-2.0
+ */
 #include "policy_adapter.hpp"
 #include "controller.hpp"
 #include <filesystem>  // NOLINT(build/c++17)
@@ -41,16 +45,7 @@ inline Quaternion yaw_quaternion(const Quaternion& quaternion) {
     return {std::cos(0.5F * yaw), 0.0F, 0.0F, std::sin(0.5F * yaw)};
 }
 
-inline std::array<float, 6> right_flip_rotation_six(const Quaternion& quaternion) {
-    const auto [w, x, y, z] = normalize(quaternion);
-    const float r00 = 1.0F - 2.0F * (y * y + z * z);
-    const float r01 = 2.0F * (x * y - z * w);
-    const float r10 = 2.0F * (x * y + z * w);
-    const float r11 = 1.0F - 2.0F * (x * x + z * z);
-    const float r02 = 2.0F * (x * z + y * w);
-    const float r12 = 2.0F * (y * z - x * w);
-    return {r00, r10, r01, r11, r02, r12};
-}
+
 
 inline std::array<float, 3> projected_gravity(const Quaternion& quaternion) {
     const auto [w, x, y, z] = normalize(quaternion);
@@ -474,14 +469,17 @@ PolicyAdapter::PolicyAdapter(const std::string& path, const std::string& directo
             spec.last_action_scale = joint_values(node, "last_action_scale", 1);
             spec.lower = joint_values(node, "joint_lower", -1000);
             spec.upper = joint_values(node, "joint_upper", 1000);
-            spec.raised_scale = joint_values(node, "raised_action_scale", 0);
             if (mode == Mode::kWave || mode == Mode::kSit) {
-                spec.effort_limit = node["effort_limit"].as<float>();
+                spec.effort_limit = joint_values(node, "effort_limit", 0);
                 spec.velocity_limit = node["velocity_limit"].as<float>();
-                if (!std::isfinite(spec.effort_limit) || !std::isfinite(spec.velocity_limit) ||
-                    spec.effort_limit <= 0 || spec.velocity_limit <= 0)
-                    throw std::invalid_argument("invalid wave actuator limits");
+                for (float limit : spec.effort_limit)
+                    if (!std::isfinite(limit) || limit <= 0)
+                        throw std::invalid_argument("invalid policy effort limits");
+                if (!std::isfinite(spec.velocity_limit) || spec.velocity_limit <= 0)
+                    throw std::invalid_argument("invalid policy velocity limit");
             }
+            if (mode == Mode::kWave)
+                spec.raised_scale = joint_values(node, "raised_action_scale", 0);
             spec.last_action_clip = node["last_action_clip"] ? node["last_action_clip"].as<float>() : 0;
             if (!std::isfinite(spec.last_action_clip) || spec.last_action_clip < 0)
                 throw std::invalid_argument("invalid last_action_clip");
@@ -492,22 +490,22 @@ PolicyAdapter::PolicyAdapter(const std::string& path, const std::string& directo
                 if (spec.lower[i] > spec.upper[i]) throw std::invalid_argument("invalid joint limits");
             if (cfg.obs_segments.size() != 1) throw std::invalid_argument("Go2 expects one observation segment");
             const auto& segment = cfg.obs_segments.front();
-            const bool history = mode == Mode::kRun || mode == Mode::kTerrain;
+            const bool history = mode == Mode::kTerrain;
             if (history && (segment.length != 5 || segment.mode != "flat_history" ||
                     segment.order != "oldest_first" || !segment.include_current))
                 throw std::invalid_argument(name + ": history layout does not match controller reset semantics");
             std::unordered_map<std::string, int> custom_dimensions;
             if (mode == Mode::kWave || mode == Mode::kSit)
                 custom_dimensions = {{"reference_delta", 12}, {"reference_phase", 2}};
-            else if (mode == Mode::kRightFlip || mode == Mode::kForwardJump)
+            else if (mode == Mode::kForwardJump)
                 custom_dimensions = {
                     {"reference_position", 12}, {"reference_velocity", 12}, {"reference_orientation", 6}};
             if (cfg.custom_array_dims != custom_dimensions)
                 throw std::invalid_argument(name + ": custom observation dimensions do not match Go2 reference terms");
             const auto dimensions = ObservationTermDimensions(cfg);
             const int frame_dim = std::accumulate(dimensions.begin(), dimensions.end(), 0);
-            const int expected = mode == Mode::kWave || mode == Mode::kSit ? 56
-                : mode == Mode::kRightFlip || mode == Mode::kForwardJump ? 69 : 45;
+            const int expected = (mode == Mode::kWave || mode == Mode::kSit) ? 56
+                : mode == Mode::kForwardJump ? 69 : 45;
             if (frame_dim != expected) throw std::invalid_argument(name + ": unexpected observation frame dimension");
             if (!history && !segment.mode.empty()) throw std::invalid_argument(name + ": unexpected history segment");
             const std::set<std::string> builtins{"ang_vel", "gravity", "command", "dof_pos", "dof_vel", "last_action"};
@@ -542,7 +540,7 @@ rl_policy::PolicyExecutor& PolicyAdapter::executor(Mode mode) const {
     model->Init(config);
     if (model->ActionDim() != static_cast<int>(kNumJoints))
         throw std::invalid_argument("Go2 policy must output 12 actions");
-    if ((mode == Mode::kRightFlip || mode == Mode::kForwardJump) && model->ObsDim() != 69)
+    if (mode == Mode::kForwardJump && model->ObsDim() != 69)
         throw std::invalid_argument("Go2 motion tracking requires 69 observation values");
     auto& result = *model;
     executors_.emplace(mode, std::move(model));
@@ -641,13 +639,6 @@ VelocityCommand PolicyAdapter::command_for_mode(VelocityCommand command, Mode mo
         std::clamp(command.yaw, spec.yaw_lo, spec.yaw_hi)};
 }
 
-VelocityCommand PolicyAdapter::limit_command(VelocityCommand command) const {
-    if (!std::isfinite(command.vx) || !std::isfinite(command.vy) || !std::isfinite(command.yaw)) {
-        throw std::invalid_argument("velocity command contains NaN or infinity");
-    }
-    return command_for_mode(command, Mode::kWalk);
-}
-
 // 策略关节序 → 硬件关节序映射。
 const std::array<std::size_t, kNumJoints>& PolicyAdapter::policy_to_hardware(Mode mode) const {
     return spec_for(mode).mapping;
@@ -655,22 +646,19 @@ const std::array<std::size_t, kNumJoints>& PolicyAdapter::policy_to_hardware(Mod
 
 Joints PolicyAdapter::action_to_hardware_targets(const Action& action, Mode mode, float reference_time,
     const std::vector<Joints>& sit_trajectory, std::size_t variant_index) const {
-    const auto& map = policy_to_hardware(mode);
     Joints target{};
     if (mode == Mode::kSit) return sit_hardware_targets(sit_trajectory, action, reference_time);
     if (mode == Mode::kWave) {
         const auto reference = wave_reference(reference_time);
+        const auto& spec = spec_for(mode);
+        const auto& scales = spec.loaded.exec_cfg.action_scale;
         for (std::size_t i = 0; i < kNumJoints; ++i) {
-            if (!std::isfinite(action[i])) {
-                throw std::invalid_argument("non-finite wave action");
-            }
-            const auto& spec = spec_for(mode);
-            const auto& scales = spec.loaded.exec_cfg.action_scale;
-            const float scale =
-                scales[scales.size() == 1 ? 0 : i] * (1 - reference.lift) + spec.raised_scale[i] * reference.lift;
-            target[map[i]] =
-                std::clamp(reference.position[i] + scale * std::clamp(action[i], -spec.target_clip, spec.target_clip),
-                    spec.lower[i], spec.upper[i]);
+            if (!std::isfinite(action[i])) throw std::invalid_argument("non-finite wave action");
+            const float scale = scales[scales.size() == 1 ? 0 : i] * (1 - reference.lift) +
+                spec.raised_scale[i] * reference.lift;
+            target[spec.mapping[i]] = std::clamp(reference.position[i] +
+                    scale * std::clamp(action[i], -spec.target_clip, spec.target_clip),
+                spec.lower[i], spec.upper[i]);
         }
         return target;
     }
@@ -685,10 +673,6 @@ Joints PolicyAdapter::action_to_hardware_targets(const Action& action, Mode mode
     return target;
 }
 
-Joints PolicyAdapter::action_to_hardware_targets(const Action& action) const {
-    return action_to_hardware_targets(action, Mode::kWalk);
-}
-
 GainSet PolicyAdapter::policy_gains(Mode mode, std::size_t variant_index) const {
     const auto& loaded = variant(mode, variant_index).loaded;
     GainSet result;
@@ -701,13 +685,6 @@ GainSet PolicyAdapter::policy_gains(Mode mode, std::size_t variant_index) const 
 
 namespace go2 {
 using namespace detail;  // NOLINT(build/namespaces)
-
-namespace {
-float smooth(float x) {
-    x = std::clamp(x, 0.F, 1.F);
-    return std::clamp(x * x * x * (10.F + x * (-15.F + 6.F * x)), 0.F, 1.F);
-}
-}  // namespace
 
 std::vector<MotionReference> load_motion_reference(const std::string& path, unsigned expected_frames) {
     std::ifstream motion(path);
@@ -732,6 +709,13 @@ std::vector<MotionReference> load_motion_reference(const std::string& path, unsi
     if (!motion.eof()) throw std::runtime_error("unexpected motion trailing data");
     return reference;
 }
+
+namespace {
+float smooth(float x) {
+    x = std::clamp(x, 0.F, 1.F);
+    return std::clamp(x * x * x * (10.F + x * (-15.F + 6.F * x)), 0.F, 1.F);
+}
+}  // namespace
 
 std::vector<Joints> load_sit_reference(const std::string& path) {
     std::vector<Joints> joints;
@@ -787,10 +771,13 @@ Joints PolicyAdapter::sit_hardware_targets(
 
 unsigned next_wave_tick(unsigned tick, bool raised) {
     const unsigned start = tick == 0U && raised ? 30U : tick;
-    if (tick == 0U && !raised) return 0U;
+    if (tick == 0U && !raised)
+        return 0U;
     unsigned next = start + 1U;
-    if (start < 90U && next >= 90U && !raised) next += 120U;
-    if (start < 210U && next >= 210U && raised) next -= 120U;
+    if (start < 90U && next >= 90U && !raised)
+        next += 120U;
+    if (start < 210U && next >= 210U && raised)
+        next -= 120U;
     return next >= 270U ? 0U : next;
 }
 
@@ -836,14 +823,9 @@ WaveReference wave_reference(float time) {
     return reference;
 }
 
-Joints PolicyAdapter::wave_torques(const Joints& target, const RobotState& state) const {
-    return wave_torques(target, state, Mode::kWave);
-}
-
-Joints PolicyAdapter::wave_torques(const Joints& target, const RobotState& state, Mode mode) const {
-    // Isaac Lab 2.3 DCMotor._clip_effort, with the archived wave actuator values.
+Joints PolicyAdapter::policy_torques(const Joints& target, const RobotState& state, Mode mode) const {
+    // Match the DC motor torque-speed limits used by wave and sit training.
     const auto& spec = spec_for(mode);
-    const float effort_limit = spec.effort_limit;
     const float velocity_limit = spec.velocity_limit;
     const auto gains = policy_gains(mode);
     Joints torque{};
@@ -851,11 +833,13 @@ Joints PolicyAdapter::wave_torques(const Joints& target, const RobotState& state
         const auto& feedback = state.motors.joints[i].feedback;
         if (!std::isfinite(target[i]) || !std::isfinite(feedback.position_rad) ||
             !std::isfinite(feedback.velocity_rad_s)) {
-            throw std::invalid_argument("non-finite wave actuator input");
+            throw std::invalid_argument("non-finite policy actuator input");
         }
         const auto policy_index = std::find(spec.mapping.begin(), spec.mapping.end(), i) - spec.mapping.begin();
         const float raw = gains.kp[policy_index] * (target[i] - feedback.position_rad) -
             gains.kd[policy_index] * feedback.velocity_rad_s;
+        const float effort_limit = spec.effort_limit[policy_index];
+
         const float velocity = std::clamp(feedback.velocity_rad_s, -2.0F * velocity_limit, 2.0F * velocity_limit);
         const float upper = std::min(effort_limit * (1.0F - velocity / velocity_limit), effort_limit);
         const float lower = std::max(effort_limit * (-1.0F - velocity / velocity_limit), -effort_limit);
@@ -874,30 +858,22 @@ using namespace detail;  // NOLINT(build/namespaces)
 // ============================================================================
 
 std::vector<float> PolicyAdapter::build_observation(const RobotState& state, VelocityCommand command,
-    const Action& previous, Mode mode, float reference_time,
-    const std::vector<Joints>& sit_trajectory) const {
+    const Action& previous, Mode mode, float reference_time, const std::vector<Joints>& sit_trajectory) const {
     const auto observed_command = command_for_mode(command, mode);
-    const auto& defaults = default_joint_position(mode);
-
-    if (mode == Mode::kWalk || mode == Mode::kRun || mode == Mode::kTerrain)
+    if (mode == Mode::kWalk || mode == Mode::kTerrain)
         return observation_frame(mode, state, observed_command, previous, spec_for(mode));
-    if (mode == Mode::kSit) return build_sit_observation(sit_trajectory, state, previous, reference_time);
-    if (mode == Mode::kForwardJump) {
-        // Policy::infer fills the archived reference for the accepted controller frame.
-        return build_motion_observation(mode, state, default_joint_position(mode), {}, {1, 0, 0, 0}, previous);
-    }
     if (mode == Mode::kWave) {
         const auto reference = wave_reference(reference_time);
+        const auto& spec = spec_for(mode);
         std::vector<float> delta(12);
-        for (unsigned i = 0; i < 12; ++i) delta[i] = reference.position[i] - defaults[i];
-        return observation_frame(mode, state, {}, previous, spec_for(mode),
+        for (unsigned i = 0; i < 12; ++i) delta[i] = reference.position[i] - spec.default_pos[i];
+        return observation_frame(mode, state, {}, previous, spec,
             {{"reference_delta", delta},
                 {"reference_phase", {std::sin(kTwoPi * reference.phase), std::cos(kTwoPi * reference.phase)}}});
     }
-    if (mode == Mode::kRightFlip) {
-        const Joints reference{};
-        return build_motion_observation(mode, state, reference, reference, state.imu.six_axis_quaternion, previous);
-    }
+    if (mode == Mode::kSit) return build_sit_observation(sit_trajectory, state, previous, reference_time);
+    if (mode == Mode::kForwardJump)
+        return build_motion_observation(mode, state, default_joint_position(mode), {}, {1, 0, 0, 0}, previous);
 
     throw std::invalid_argument("unsupported observation adapter");
 }
@@ -913,21 +889,16 @@ Quaternion motion_yaw_alignment(const Quaternion& actual, const Quaternion& refe
 std::vector<float> PolicyAdapter::build_motion_observation(Mode mode, const RobotState& state,
     const Joints& reference_position, const Joints& reference_velocity, const Quaternion& reference_quaternion,
     const Action& previous, const Quaternion& right_yaw_alignment) const {
-    if (mode != Mode::kRightFlip && mode != Mode::kForwardJump) {
+    if (mode != Mode::kForwardJump) {
         throw std::invalid_argument("motion observation requires a motion mode");
     }
     const auto aligned_reference = multiply(right_yaw_alignment, reference_quaternion);
-    // Slot 11 Isaac Lab uses R_robot^T R_reference, first two columns in
-    // row-major order. Preserve slot 18's distinct historical contract.
-    const auto relative = mode == Mode::kForwardJump
-        ? multiply(conjugate(state.imu.six_axis_quaternion), aligned_reference)
-        : multiply(conjugate(aligned_reference), state.imu.six_axis_quaternion);
-    auto orientation = right_flip_rotation_six(relative);
-    if (mode == Mode::kForwardJump) {
-        const auto [w, x, y, z] = normalize(relative);
-        orientation = {1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
-            2 * (x * z - y * w), 2 * (y * z + x * w)};
-    }
+    // Isaac Lab uses R_robot^T R_reference, first two columns in row-major order.
+    const auto relative = multiply(conjugate(state.imu.six_axis_quaternion), aligned_reference);
+    const auto [w, x, y, z] = normalize(relative);
+    const std::array<float, 6> orientation = {
+        1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * y + z * w), 1 - 2 * (x * x + z * z),
+        2 * (x * z - y * w), 2 * (y * z + x * w)};
     return observation_frame(mode, state, {}, previous, spec_for(mode),
         {{"reference_position", {reference_position.begin(), reference_position.end()}},
             {"reference_velocity", {reference_velocity.begin(), reference_velocity.end()}},

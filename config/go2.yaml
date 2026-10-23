@@ -31,10 +31,6 @@ go2:
     stand_duration_sec: 1.0
     crouch_pose_duration_sec: 1.0
     protective_crouch_duration_sec: 1.0
-    run_linear_acceleration_mps2: 1.5
-    run_yaw_acceleration_rad_s2: 2.0
-    run_linear_deceleration_mps2: 2.5
-    run_yaw_deceleration_rad_s2: 3.0
     motor_driver: drv_485_m8010a
     startup_attempts: 5
     serial_devices: [/dev/go2/motor-fr, /dev/go2/motor-fl, /dev/go2/motor-rr, /dev/go2/motor-rl]
