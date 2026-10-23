@@ -95,6 +95,7 @@ public final class MainActivity extends Activity {
         settings.setMediaPlaybackRequiresUserGesture(false);
         web.setWebViewClient(new WebViewClient() {
             @Override public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                if (!request.isForMainFrame()) return false;
                 Uri current = Uri.parse(loadedUrl), destination = request.getUrl();
                 return !"http".equals(destination.getScheme()) || !java.util.Objects.equals(current.getHost(), destination.getHost())
                         || current.getPort() != destination.getPort();

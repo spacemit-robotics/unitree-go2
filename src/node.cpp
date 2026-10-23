@@ -676,12 +676,12 @@ void Node::control_tick() {
             imu_received ? "有" : "无", imu_fresh ? "是" : "否", motor_valid == kNumGo2Motors ? "齐全" : "不全",
             motor_valid, motor_anchored == kNumGo2Motors ? "已通过" : "未通过", motor_anchored,
             foc_commands > 0 ? "已发送" : "未发送", foc_commands, mode_display(status_snapshot.mode),
-            static_cast<unsigned long>(debug_policy_requests_), static_cast<unsigned long>(debug_policy_completed_),
-            static_cast<unsigned long>(debug_policy_failed_), inference_ms_.load());
+            static_cast<unsigned long>(debug_policy_requests_.exchange(0, std::memory_order_relaxed)),
+            static_cast<unsigned long>(debug_policy_completed_.exchange(0, std::memory_order_relaxed)),
+            static_cast<unsigned long>(debug_policy_failed_.exchange(0, std::memory_order_relaxed)), inference_ms_.load());
         last_report_ = now;
         period_sum_ms_ = period_max_ms_ = 0;
         period_count_ = 0;
-        debug_policy_requests_ = debug_policy_completed_ = debug_policy_failed_ = 0;
     }
 }
 void Node::policy_tick() {
@@ -690,7 +690,7 @@ void Node::policy_tick() {
     const auto begin = SteadyClock::now();
     const auto request = controller_->prepare_policy(state, begin);
     if (!request) return;
-    ++debug_policy_requests_;
+    debug_policy_requests_.fetch_add(1, std::memory_order_relaxed);
     try {
         const Action action = policy_->infer(
             request->mode, request->observation, &request->state, request->policy_frame);
@@ -698,9 +698,9 @@ void Node::policy_tick() {
         const auto end = SteadyClock::now();
         inference_ms_.store(seconds(end - begin) * 1000);
         controller_->complete_policy(*request, action, end);
-        ++debug_policy_completed_;
+        debug_policy_completed_.fetch_add(1, std::memory_order_relaxed);
     } catch (const std::exception& e) {
-        ++debug_policy_failed_;
+        debug_policy_failed_.fetch_add(1, std::memory_order_relaxed);
         RCLCPP_ERROR(get_logger(), "策略推理失败（模式=%s）：%s", mode_display(request->mode), e.what());
         controller_->fail_policy(*request, e.what());
     }

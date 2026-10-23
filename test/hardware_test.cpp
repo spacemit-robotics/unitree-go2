@@ -4,9 +4,11 @@
  */
 #include "hardware.hpp"
 #include "support.hpp"
+#include <atomic>
 #include <iostream>
 #include <limits>
 #include <string>
+#include <thread>
 
 int main() {
     // A mounting correction changes all sensor-frame quantities consistently.
@@ -240,6 +242,44 @@ int main() {
     near(mock.read(at(11)).motors.joints[0].feedback.position_rad, .2F);
     mock.stop();
     mock.stop();
+    // Calibration can stop/restart hardware while ROS callbacks read and write.
+    // A command that arrives during a stopped interval must be rejected cleanly.
+    {
+        go2::Hardware concurrent(config);
+        concurrent.start();
+        std::atomic_bool running{true};
+        std::atomic<unsigned> reads{0}, writes{0};
+        std::thread reader([&] {
+            while (running.load()) {
+                assert(concurrent.read().imu.valid);
+                ++reads;
+                std::this_thread::yield();
+            }
+        });
+        std::thread writer([&] {
+            while (running.load()) {
+                try {
+                    concurrent.write(go2::Commands{});
+                    ++writes;
+                } catch (const std::logic_error&) {
+                    // stop() may acquire the lifecycle lock before this write.
+                }
+                std::this_thread::yield();
+            }
+        });
+        while (reads.load() == 0 || writes.load() == 0) {
+            std::this_thread::yield();
+        }
+        for (unsigned i = 0; i < 100; ++i) {
+            concurrent.stop();
+            concurrent.replace_calibration({}, {});
+            concurrent.start();
+        }
+        running = false;
+        reader.join();
+        writer.join();
+        concurrent.stop();
+    }
     config.backend = go2::Backend::kSerial;
     rejects([&] { go2::Hardware unapproved(config); });
     static_assert(go2::kMotorBaudrate == 4000000U);

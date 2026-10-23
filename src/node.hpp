@@ -70,8 +70,8 @@ class Node final : public rclcpp::Node {
     std::string imu_frame_;
     double orientation_covariance_{.05}, angular_covariance_{.01}, acceleration_covariance_{.1};
     std::uint64_t imu_sequence_{0}, period_count_{0};
-    std::uint64_t debug_control_ticks_{0}, debug_policy_requests_{0};
-    std::uint64_t debug_policy_completed_{0}, debug_policy_failed_{0};
+    std::uint64_t debug_control_ticks_{0};
+    std::atomic<std::uint64_t> debug_policy_requests_{0}, debug_policy_completed_{0}, debug_policy_failed_{0};
     TimePoint last_control_{}, last_report_{};
     TimePoint last_status_report_{};
     bool native_uart_debug_{false}, last_native_protective_{false};
