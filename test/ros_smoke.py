@@ -51,7 +51,7 @@ def main():
     from geometry_msgs.msg import Twist
     from std_msgs.msg import String
     from sensor_msgs.msg import Imu, JointState
-    from unitree_go2.srv import SetMode
+    from unitree_go2.srv import Calibration, SetMode
     rclpy.init()
     node = rclpy.create_node("go2_software_acceptance")
     processes, logs, subscriptions = [], [], []
@@ -120,6 +120,22 @@ def main():
         command.publish(velocity)
         spin(.5)
         assert mode("passive").message == "already passive", "cmd_vel_direct activated control"
+        calibration = node.create_client(Calibration, "/go2/calibration")
+        assert calibration.wait_for_service(timeout_sec=5)
+        # Exercise hardware lifecycle changes while IMU/status callbacks run.
+        for operation in ("finish", "resume", "abort") * 3:
+            for action in ("prepare", operation):
+                request = Calibration.Request()
+                request.operation = action
+                if action == "finish":
+                    request.joint_zero_offsets_rad = [0.] * 12
+                    request.startup_reference_rotor_positions_rad = [0.] * 12
+                future = calibration.call_async(request)
+                rclpy.spin_until_future_complete(node, future, timeout_sec=5)
+                assert future.done() and future.result().accepted, action
+                spin(.03)
+                assert control.poll() is None, "node exited during calibration"
+        report["calibration_lifecycle"] = "PASS: prepare/finish/resume/abort with concurrent publishers"
         # Removed modes are rejected by every public mode service.
         for service_name in ("/go2/set_mode", "/go2/set_mode_rc", "/go2/set_mode_web"):
             request_client = node.create_client(SetMode, service_name)

@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <pthread.h>
 #include <sched.h>
+#include <shared_mutex>
 #include <stdexcept>
 #include <string>
 
@@ -1603,6 +1604,7 @@ struct Hardware::Impl {
     HardwareConfig config;
     std::unique_ptr<MotorBank> motors;
     std::unique_ptr<struct imu_dev, ImuDeleter> imu;
+    mutable std::shared_mutex lifecycle_mutex;
     mutable std::mutex mutex;
     mutable std::mutex imu_mutex;
     ImuSample imu_sample{};
@@ -1676,6 +1678,16 @@ struct Hardware::Impl {
         std::lock_guard<std::mutex> lock(imu_mutex);
         imu_sample.valid = false;
     }
+
+    void stop() {
+        if (motors) {
+            motors->set_commands(Commands{});
+            motors->stop();
+        }
+        stop_imu();
+        imu.reset();
+        started = false;
+    }
 };
 
 Hardware::Hardware(HardwareConfig config) : impl_(std::make_unique<Impl>(std::move(config))) {}
@@ -1683,6 +1695,7 @@ Hardware::~Hardware() { stop(); }
 
 void Hardware::start() {
     auto &h = *impl_;
+    std::unique_lock<std::shared_mutex> lock(h.lifecycle_mutex);
     if (h.started)
         return;
     if (h.config.backend == Backend::kSerial) {
@@ -1713,7 +1726,7 @@ void Hardware::start() {
             h.start_imu();
             h.motors->start();
         } catch (...) {
-            stop();
+            h.stop();
             throw;
         }
     }
@@ -1722,20 +1735,16 @@ void Hardware::start() {
 
 void Hardware::stop() {
     auto &h = *impl_;
-    if (h.motors) {
-        h.motors->set_commands(Commands{});
-        // Each worker sends best-effort BRAKE to all three motors before closing.
-        h.motors->stop();
-    }
-    h.stop_imu();
-    h.imu.reset();
-    h.started = false;
+    std::unique_lock<std::shared_mutex> lock(h.lifecycle_mutex);
+    // Each worker sends best-effort BRAKE before its devices are released.
+    h.stop();
 }
 
 void Hardware::replace_calibration(
     const std::array<float, kNumGo2Motors>& offsets,
     const std::array<float, kNumGo2Motors>& startup_rotors) {
     auto& h = *impl_;
+    std::unique_lock<std::shared_mutex> lock(h.lifecycle_mutex);
     if (h.started) throw std::runtime_error("replace_calibration requires stopped hardware");
     for (std::size_t leg = 0; leg < kNumGo2Legs; ++leg) {
         for (std::size_t local = 0; local < kMotorsPerLeg; ++local) {
@@ -1748,6 +1757,7 @@ void Hardware::replace_calibration(
 
 RobotState Hardware::read(TimePoint now) const {
     auto &h = *impl_;
+    std::shared_lock<std::shared_mutex> lock(h.lifecycle_mutex);
     if (h.config.backend == Backend::kMock) {
         std::lock_guard<std::mutex> lock(h.mutex);
         RobotState state = h.mock;
@@ -1770,6 +1780,7 @@ RobotState Hardware::read(TimePoint now) const {
 
 void Hardware::write(const Commands &commands) {
     auto &h = *impl_;
+    std::shared_lock<std::shared_mutex> lock(h.lifecycle_mutex);
     if (!h.started)
         throw std::logic_error("hardware has not started");
     if (h.config.backend == Backend::kSerial) {
