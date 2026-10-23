@@ -23,7 +23,10 @@ tests:
       if [[ -n "${CI_BUILD_TARGET:-}" ]]; then
           lunch "$CI_BUILD_TARGET"
       fi
-      python3 "$SROBOTIS_TEST_MODULE/scripts/download_models_go2.py"
+      # Reach the model archive directly instead of inheriting an outbound proxy.
+      NO_PROXY="${NO_PROXY:+${NO_PROXY},}archive.spacemit.com" \
+      no_proxy="${no_proxy:+${no_proxy},}archive.spacemit.com" \
+          python3 "$SROBOTIS_TEST_MODULE/scripts/download_models_go2.py"
       (
           cd "$SROBOTIS_TEST_MODULE"
           mm -j4 -DBUILD_TESTING=ON
