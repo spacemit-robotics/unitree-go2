@@ -1,5 +1,7 @@
 # Go2 on SpacemiT K3
 
+完整的方案介绍、SDK 组合下载、接线与标定步骤见 [使用说明](docs/usage.md)。
+
 ## 直接运行
 
 以下命令在 K3 板端以 root 执行，SDK 位于 `/root/spacemit_robot`，使用 `new_bigcore` 配置。
@@ -24,19 +26,24 @@ Android 手机可[下载并安装 Go2 App](https://archive.spacemit.com/ros2/pre
 
 ## 热点连接
 
-先停止当前 Go2 程序，再临时以热点模式启动；后台运行可避免切换网络时 SSH 断开导致程序退出：
+先停止当前 Go2 程序，再通过 systemd 临时服务以热点模式启动，切换网络时 SSH 断开也能继续运行：
 
 ```bash
-cd /root/spacemit_robot
-nohup env GO2_NETWORK_MODE=ap bash application/ros2/unitree-go2/scripts/start-go2.sh \
-  >/tmp/go2-ap.log 2>&1 </dev/null &
-echo $! >/tmp/go2-ap.pid
+systemd-run --unit=go2-ap --collect \
+  --working-directory=/root/spacemit_robot \
+  --property=KillSignal=SIGINT --property=KillMode=mixed \
+  --property=TimeoutStopSec=50 \
+  --setenv=SROBOTIS_ROOT=/root/spacemit_robot \
+  --setenv=GO2_NETWORK_MODE=ap \
+  /bin/bash /root/spacemit_robot/application/ros2/unitree-go2/scripts/start-go2.sh
 ```
 
 热点名称由本机配置的 `robot.ap_ssid` 决定，参考配置为 `Go2`，默认密码为 `go2control`。
 连接后打开[热点控制网页](http://10.0.91.250:8082/)。
 
-停止临时热点程序时，在板端执行 `kill -INT "$(cat /tmp/go2-ap.pid)"`，程序会尝试恢复原来的 Wi-Fi。
+停止临时热点程序时，PC 连接热点后通过 `ssh root@10.0.91.250` 登录板子，
+再执行 `systemctl stop go2-ap.service`。程序会尝试恢复原来的 Wi-Fi。
+若停止时提示临时服务未加载，说明程序已退出。日志使用 `journalctl -u go2-ap.service -f` 查看。
 需要长期使用热点时，安装下面的自启服务并切换到热点模式。
 
 ## 开机自启
@@ -174,16 +181,8 @@ m
 ```
 
 本机身份和标定保存在 `/etc/unitree-go2/robot.yaml`。已有配置继续使用；
-首次部署时，在 SDK 根目录执行以下命令，仅在文件不存在时复制模板：
-
-```bash
-test -e /etc/unitree-go2/robot.yaml ||
-  install -D -m 600 application/ros2/unitree-go2/config/robot.yaml /etc/unitree-go2/robot.yaml
-```
-
-参照 [config/robot.yaml](config/robot.yaml)，将 `robot.board_profile` 设置为 `new_bigcore`，
-填写本机身份、通信域和 IMU 补偿，再按 [XYZ 标定说明](tool/calibration/CALIBRATION.md) 完成电机标定。
-模板的标定数据来自样机，不能直接套用到其他机器，完成本机标定后再启动。
+首次部署时，按[本机配置与标定](docs/usage.md#4-本机配置与标定)创建本机配置并完成 XYZ 标定。
+配置中的 `robot.board_profile` 使用 `new_bigcore`，样机标定不能直接套用到其他机器。
 
 摄像头预览需要 FFmpeg 和 [MediaMTX riscv64](https://github.com/Fitz8863/spacemit-mediamtx/releases/tag/v1.20.1-riscv64)，
 将 `mediamtx` 放入 `/usr/local/bin/`。

@@ -60,6 +60,7 @@ install(TARGETS motor_brake_capture DESTINATION lib/${PROJECT_NAME}/tool/calibra
 install(DIRECTORY config launch resources DESTINATION share/${PROJECT_NAME}
         PATTERN "__pycache__" EXCLUDE PATTERN "*.pyc" EXCLUDE)
 install(DIRECTORY clients/web DESTINATION share/${PROJECT_NAME})
+install(DIRECTORY docs DESTINATION share/${PROJECT_NAME})
 install(DIRECTORY policy DESTINATION share/${PROJECT_NAME} OPTIONAL
         FILES_MATCHING PATTERN "*.onnx")
 install(PROGRAMS scripts/web_teleop_server.py scripts/go2_network.py
