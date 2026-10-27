@@ -137,21 +137,6 @@ board_profiles:
     sbus_device: /dev/ttyS7  # UART7 RX, GPIO14, J22; board already inverts SBUS.
     imu_overrides: *bmi270_mount
 
-  new_usbmotor:
-    go2:
-      motor_driver: drv_485_m8010a
-      # Bind stable aliases to the four USB-RS485 interfaces in logical leg order.
-      serial_devices: [/dev/go2/motor-fr, /dev/go2/motor-fl, /dev/go2/motor-rr, /dev/go2/motor-rl]
-      imu_driver: drv_spi_bmi270
-      # Keep the new-bigcore IIO BMI270 path; only the motor transport changes.
-      imu_device: /dev/iio:device0
-      imu_gpiochip: ""
-      imu_gpio_line: 0
-      # J13 white/orange/red/green; identify PWM by platform device, not chip numbering.
-      led_pwm_devices: [d4022400.pwm, d4020c00.pwm, d4022800.pwm, d4022c00.pwm]
-    sbus_device: /dev/ttyS7  # Keep the new-bigcore UART7 SBUS path.
-    imu_overrides: *bmi270_mount
-
   new_smallcore:
     go2:
       motor_driver: go2_smallcore

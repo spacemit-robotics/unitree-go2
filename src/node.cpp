@@ -110,11 +110,8 @@ Node::Node() : rclcpp::Node("go2") {
         h.board_profile = BoardProfile::kNewSmallcore;
     } else if (board_profile == "new_bigcore") {
         h.board_profile = BoardProfile::kNewBigcore;
-    } else if (board_profile == "new_usbmotor") {
-        h.board_profile = BoardProfile::kNewUsbMotor;
     } else {
-        throw std::invalid_argument(
-            "board_profile must be legacy_usb, new_smallcore, new_bigcore or new_usbmotor");
+        throw std::invalid_argument("board_profile must be legacy_usb, new_smallcore or new_bigcore");
     }
     RCLCPP_INFO(get_logger(), "Board profile: %s", board_profile.c_str());
     const auto backend = parameter(*this, "backend", std::string("mock"));

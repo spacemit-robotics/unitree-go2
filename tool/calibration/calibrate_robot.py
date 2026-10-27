@@ -83,7 +83,7 @@ def validate(config, reference):
             raise ValueError(f"{name}: does not match the fixed Go2 layout")
     if params.get("motor_driver") != "drv_485_m8010a":
         raise ValueError("calibration requires the Go2 direct UART driver")
-    if params.get("board_profile", "legacy_usb") not in ("legacy_usb", "new_bigcore", "new_usbmotor"):
+    if params.get("board_profile", "legacy_usb") not in ("legacy_usb", "new_bigcore"):
         raise ValueError("capture requires direct UART or USB motor devices")
     if "crc_seed" in params and params["crc_seed"] != 0x2CBB:
         raise ValueError("Go2 CRC seed must be 0x2CBB")

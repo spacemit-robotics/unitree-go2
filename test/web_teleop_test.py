@@ -40,9 +40,45 @@ namespace.update({"Path": Path, "os": os, "shutil": shutil, "signal": signal,
 camera_class = next(item for item in tree.body if isinstance(item, ast.ClassDef) and item.name == "Camera")
 exec(compile(ast.Module(body=[camera_class], type_ignores=[]), str(source), "exec"), namespace)
 Camera = namespace["Camera"]
-for name in ("handler", "set_mode"):
+for name in ("handler", "set_mode", "controller_ready"):
     method = next(item for item in web_node.body if isinstance(item, ast.FunctionDef) and item.name == name)
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), "exec"), namespace)
+
+
+class ControllerReadyTests(unittest.TestCase):
+    def setUp(self):
+        self.ros = Mock()
+        self.ros.ok.return_value = True
+        self.node = SimpleNamespace(_closing=False, context=object(), mode_client=Mock(),
+                                    _status_received_at=time.monotonic())
+        self.node.mode_client.service_is_ready.return_value = True
+
+    def ready(self):
+        with patch.dict(namespace, {"rclpy": self.ros}):
+            return namespace["controller_ready"](self.node)
+
+    def test_shutdown_does_not_access_destroyed_client(self):
+        self.node._closing = True
+        self.assertFalse(self.ready())
+        self.node._closing = False
+        self.ros.ok.return_value = False
+        self.assertFalse(self.ready())
+        self.node.mode_client.service_is_ready.assert_not_called()
+
+    def test_context_shutdown_during_client_query_returns_disconnected(self):
+        self.ros.ok.side_effect = [True, False]
+        self.node.mode_client.service_is_ready.side_effect = RuntimeError("rcl node context is invalid")
+        self.assertFalse(self.ready())
+
+    def test_active_context_errors_are_reported(self):
+        self.node.mode_client.service_is_ready.side_effect = RuntimeError("unexpected service error")
+        with self.assertRaisesRegex(RuntimeError, "unexpected service error"):
+            self.ready()
+
+    def test_live_client_requires_fresh_status(self):
+        self.assertTrue(self.ready())
+        self.node._status_received_at = time.monotonic() - 4
+        self.assertFalse(self.ready())
 
 
 class CameraTests(unittest.TestCase):

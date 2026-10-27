@@ -402,6 +402,7 @@ class Camera:
 class Go2WebNode(Node):
     def __init__(self) -> None:
         super().__init__("go2_web")
+        self._closing = False
         share = Path(get_package_share_directory("unitree_go2"))
         self.robot = str(self.declare_parameter("robot", "go2").value)
         if not valid_robot_id(self.robot):
@@ -580,7 +581,15 @@ class Go2WebNode(Node):
         return result
 
     def controller_ready(self) -> bool:
-        return self.mode_client.service_is_ready() and time.monotonic() - self._status_received_at < 3.0
+        if self._closing or not rclpy.ok(context=self.context):
+            return False
+        try:
+            return self.mode_client.service_is_ready() and time.monotonic() - self._status_received_at < 3.0
+        except RuntimeError:
+            # SIGINT may invalidate the context between the check and the ROS call.
+            if self._closing or not rclpy.ok(context=self.context):
+                return False
+            raise
 
     def status(self) -> dict[str, Any]:
         # Process cleanup must not block joystick reception on the velocity lock.
@@ -812,6 +821,7 @@ class Go2WebNode(Node):
         return Handler
 
     def destroy_node(self) -> bool:
+        self._closing = True
         try:
             self.control.close()
             if rclpy.ok():

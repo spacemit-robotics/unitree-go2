@@ -2,17 +2,66 @@
  * Copyright (C) 2026 SpacemiT (Hangzhou) Technology Co. Ltd.
  * SPDX-License-Identifier: Apache-2.0
  */
-// Exercise the private event bridge without opening UARTs or creating teleop.
+// Exercise the event bridge and receiver recovery using pseudo-terminals.
 #define main sbus_teleop_entry
 #include "../src/sbus_teleop_node.cpp"
 #undef main
 
 #include <cassert>
+#include <cstdlib>
+#include <fcntl.h>
 #include <thread>
+#include <unistd.h>
 
 namespace {
 
 struct SbusTeleopTestAccess {
+    static void check_receiver_recovery() {
+        char directory[] = "/tmp/go2-sbus-recovery-XXXXXX";
+        assert(mkdtemp(directory));
+        const std::string device = std::string(directory) + "/receiver";
+        rclcpp::NodeOptions options;
+        options.append_parameter_override("device", device);
+        options.append_parameter_override("shared_control", true);
+        auto teleop = std::shared_ptr<SbusTeleopNode>(new SbusTeleopNode(true, options));
+        assert(!teleop->receiver_started_ && !teleop->valid_frame_received_);
+        rclcpp::executors::SingleThreadedExecutor executor;
+        executor.add_node(teleop);
+        const auto wait_for = [&](const std::function<bool()>& ready) {
+            const auto deadline = Clock::now() + std::chrono::seconds(3);
+            while (!ready() && Clock::now() < deadline) {
+                executor.spin_some();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            assert(ready());
+        };
+        const auto attach = [&]() {
+            const int master = posix_openpt(O_RDWR | O_NOCTTY);
+            assert(master >= 0 && grantpt(master) == 0 && unlockpt(master) == 0);
+            assert(unlink(device.c_str()) == 0 || errno == ENOENT);
+            assert(symlink(ptsname(master), device.c_str()) == 0);
+            return master;
+        };
+        std::array<std::uint8_t, 25> frame{};
+        frame[0] = 0x0f;
+        int master = attach();
+        wait_for([&] { return teleop->receiver_started_; });
+        assert(write(master, frame.data(), frame.size()) == static_cast<ssize_t>(frame.size()));
+        wait_for([&] { return teleop->valid_frame_received_; });
+        const auto previous_frame = teleop->last_frame_;
+        assert(close(master) == 0);
+        wait_for([&] { return rc_receiver_last_error(teleop->receiver_.get()) != 0; });
+        master = attach();
+        wait_for([&] { return teleop->receiver_started_ && rc_receiver_last_error(teleop->receiver_.get()) == 0; });
+        assert(write(master, frame.data(), frame.size()) == static_cast<ssize_t>(frame.size()));
+        wait_for([&] { return teleop->last_frame_ > previous_frame; });
+        executor.remove_node(teleop);
+        teleop.reset();
+        assert(close(master) == 0);
+        assert(unlink(device.c_str()) == 0);
+        assert(rmdir(directory) == 0);
+    }
+
     static void check_mode_mapping() {
         auto teleop = std::shared_ptr<SbusTeleopNode>(new SbusTeleopNode(false));
         const std::array<std::string, 18> modes = {
@@ -76,5 +125,6 @@ int main(int argc, char** argv) {
     node->get_node_waitables_interface()->remove_waitable(event, nullptr);
     executor.remove_node(node);
     SbusTeleopTestAccess::check_mode_mapping();
+    SbusTeleopTestAccess::check_receiver_recovery();
     rclcpp::shutdown();
 }
