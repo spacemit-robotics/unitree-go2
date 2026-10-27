@@ -34,6 +34,9 @@
   <exec_depend>avahi-daemon</exec_depend>
   <test_depend>python3-pytest</test_depend>
   <member_of_group>rosidl_interface_packages</member_of_group>
-  <export><build_type>ament_cmake</build_type></export>
+  <export>
+    <build_type>ament_cmake</build_type>
+    <system_depend>nlohmann-json3-dev</system_depend>
+  </export>
   <exec_depend>python3-yaml</exec_depend>
 </package>
