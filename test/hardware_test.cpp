@@ -230,6 +230,9 @@ int main() {
     mock.start();
     auto state = mock.read(at(10));
     assert(state.imu.valid);
+    const auto imu_only = mock.read_imu(at(10));
+    assert(imu_only.valid && imu_only.received_at == state.imu.received_at);
+    assert(imu_only.sequence == state.imu.sequence && imu_only.quaternion == state.imu.quaternion);
     for (const auto &j : state.motors.joints)
         assert(j.valid && j.feedback.position_anchored);
     go2::Commands commands{};
@@ -249,6 +252,7 @@ int main() {
         std::thread reader([&] {
             while (running.load()) {
                 assert(concurrent.read().imu.valid);
+                assert(concurrent.read_imu().valid);
                 ++reads;
                 std::this_thread::yield();
             }

@@ -249,6 +249,7 @@ public:
     void replace_calibration(const std::array<float, kNumGo2Motors>& offsets,
         const std::array<float, kNumGo2Motors>& startup_rotors);
     RobotState read(TimePoint now = SteadyClock::now()) const;
+    ImuSample read_imu(TimePoint now = SteadyClock::now()) const;
     void write(const Commands&);
 
 private:

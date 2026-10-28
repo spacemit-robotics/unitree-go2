@@ -704,7 +704,7 @@ void Node::policy_tick() {
 }
 void Node::publish_imu() {
     if (calibration_active_.load(std::memory_order_relaxed)) return;
-    const auto imu = hardware_->read().imu;
+    const auto imu = hardware_->read_imu();
     if (!imu.valid || imu.sequence == imu_sequence_) return;
     imu_sequence_ = imu.sequence;
     sensor_msgs::msg::Imu msg;
