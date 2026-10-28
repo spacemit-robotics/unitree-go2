@@ -245,7 +245,6 @@ model_manifest:
       bytes: 758549
       sha256: f2fd66b495471dd3c4fa292bfb9d5feed47ac2d9b092494471bf95535d93dfac
       training_path: self_train/1.locomotion/2.robust_locomotion/2.go2_blind_rough/models/go2_blind_rough/v2_terrain_only/2026-10-28_10-56-56_blind_rough_v2_terrain_only/exported/policy.onnx
-      url: https://github.com/spacemit-robotics/unitree-go2/releases/download/go2-walk-terrain-v2-20261028/go2_blind_rough.onnx
     go2_forward_jump.onnx:
       bytes: 808493
       sha256: 3956b5c7202512744c9ff7feb54a37f56efbb3cdfce7f8b0abd47530e4d8e32b
