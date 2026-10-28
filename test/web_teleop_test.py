@@ -22,6 +22,12 @@ import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
+try:
+    import rclpy as ros_runtime
+    from std_srvs.srv import Trigger
+except ImportError:
+    ros_runtime = None
+
 
 source = Path(__file__).resolve().parents[1] / "scripts/web_teleop_server.py"
 tree = ast.parse(source.read_text())
@@ -79,6 +85,48 @@ class ControllerReadyTests(unittest.TestCase):
         self.assertTrue(self.ready())
         self.node._status_received_at = time.monotonic() - 4
         self.assertFalse(self.ready())
+
+    @unittest.skipIf(ros_runtime is None, "requires the ROS 2 Python runtime")
+    def test_real_client_context_shutdown_during_query(self):
+        context = ros_runtime.Context()
+        with patch.dict(os.environ, {"ROS_LOCALHOST_ONLY": "1"}):
+            ros_runtime.init(args=[], context=context, domain_id=196)
+        real_node = ros_runtime.create_node("web_shutdown_context_test", context=context)
+        client = real_node.create_client(Trigger, "/go2_test/shutdown")
+        try:
+            ros_runtime.shutdown(context=context)
+            # Exercise the native ROS exception, including its actual inheritance.
+            with self.assertRaises(RuntimeError):
+                client.service_is_ready()
+            self.node.context = context
+            self.node.mode_client = client
+            self.ros.ok.side_effect = [True, False]
+            self.assertFalse(self.ready())
+        finally:
+            real_node.destroy_node()
+            if context.ok():
+                ros_runtime.shutdown(context=context)
+
+    @unittest.skipIf(ros_runtime is None, "requires the ROS 2 Python runtime")
+    def test_real_client_destroyed_during_query(self):
+        context = ros_runtime.Context()
+        with patch.dict(os.environ, {"ROS_LOCALHOST_ONLY": "1"}):
+            ros_runtime.init(args=[], context=context, domain_id=196)
+        real_node = ros_runtime.create_node("web_shutdown_handle_test", context=context)
+        client = real_node.create_client(Trigger, "/go2_test/shutdown")
+        try:
+            def close_then_query():
+                self.node._closing = True
+                real_node.destroy_client(client)
+                return client.service_is_ready()
+
+            self.node.context = context
+            self.node.mode_client = SimpleNamespace(service_is_ready=close_then_query)
+            self.assertFalse(self.ready())
+        finally:
+            real_node.destroy_node()
+            if context.ok():
+                ros_runtime.shutdown(context=context)
 
 
 class CameraTests(unittest.TestCase):
