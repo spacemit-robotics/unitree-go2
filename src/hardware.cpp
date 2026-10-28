@@ -1784,6 +1784,20 @@ RobotState Hardware::read(TimePoint now) const {
     return result;
 }
 
+ImuSample Hardware::read_imu(TimePoint now) const {
+    auto &h = *impl_;
+    std::shared_lock<std::shared_mutex> lock(h.lifecycle_mutex);
+    if (h.config.backend == Backend::kMock) {
+        std::lock_guard<std::mutex> mock_lock(h.mutex);
+        ImuSample sample = h.mock.imu;
+        sample.received_at = now;
+        sample.sequence = std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count();
+        return sample;
+    }
+    std::lock_guard<std::mutex> imu_lock(h.imu_mutex);
+    return h.imu_sample;
+}
+
 void Hardware::write(const Commands &commands) {
     auto &h = *impl_;
     std::shared_lock<std::shared_mutex> lock(h.lifecycle_mutex);
