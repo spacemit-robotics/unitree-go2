@@ -165,13 +165,14 @@ model_manifest:
       path: go2_blind_rough.onnx
       label: 平地行走
       contract: isaaclab_blind_rough_obs45_action12_joint_type_major_50hz
-      source_commit: c9872e80cff5507264ed21cea4683b7c796f0363
+      source_commit: 089b0a6e6f0f4c3e2f3f573ee3f897f985afeed5
+      training_variant: v2_terrain_only/2026-10-28_10-56-56_blind_rough_v2_terrain_only
       provenance:
         kind: self_trained
         license: Apache-2.0
         training_project: self_train/1.locomotion/2.robust_locomotion/2.go2_blind_rough
         checkpoint: model_5999.pt
-      sha256: dac692d44da6ecef5aa10ab1007217ed60c150a0b27f28b6d392ad1be20c4e30
+      sha256: f2fd66b495471dd3c4fa292bfb9d5feed47ac2d9b092494471bf95535d93dfac
     terrain:
       remote_slot: 1
       path: go2_terrain.onnx
@@ -242,8 +243,9 @@ model_manifest:
   files:
     go2_blind_rough.onnx:
       bytes: 758549
-      sha256: dac692d44da6ecef5aa10ab1007217ed60c150a0b27f28b6d392ad1be20c4e30
-      training_path: self_train/1.locomotion/2.robust_locomotion/2.go2_blind_rough/models/go2_blind_rough/v1/2026-10-22_17-46-41_blind_rough_v1/exported/policy.onnx
+      sha256: f2fd66b495471dd3c4fa292bfb9d5feed47ac2d9b092494471bf95535d93dfac
+      training_path: self_train/1.locomotion/2.robust_locomotion/2.go2_blind_rough/models/go2_blind_rough/v2_terrain_only/2026-10-28_10-56-56_blind_rough_v2_terrain_only/exported/policy.onnx
+      url: https://github.com/spacemit-robotics/unitree-go2/releases/download/go2-walk-terrain-v2-20261028/go2_blind_rough.onnx
     go2_forward_jump.onnx:
       bytes: 808493
       sha256: 3956b5c7202512744c9ff7feb54a37f56efbb3cdfce7f8b0abd47530e4d8e32b

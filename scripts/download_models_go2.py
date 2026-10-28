@@ -98,7 +98,8 @@ def main():
         remote = PurePosixPath(entry.get("remote_path", name))
         if remote.is_absolute() or ".." in remote.parts:
             raise ValueError(f"Invalid model archive path: {remote}")
-        download_model(urljoin(base_url, quote(str(remote))), target, entry)
+        model_url = entry.get("url") if args.base_url is None else None
+        download_model(model_url or urljoin(base_url, quote(str(remote))), target, entry)
     if missing:
         print("Missing or invalid assets:\n" + "\n".join(missing), file=sys.stderr)
         return 1
