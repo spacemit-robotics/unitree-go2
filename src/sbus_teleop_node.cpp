@@ -6,10 +6,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <functional>
 #include <future>
 #include <geometry_msgs/msg/twist.hpp>
@@ -141,7 +143,8 @@ class SbusTeleopNode final : public rclcpp::Node {
 
     private:
     friend struct SbusTeleopTestAccess;
-    explicit SbusTeleopNode(bool start_receiver) : rclcpp::Node("go2_sbus") {
+    explicit SbusTeleopNode(bool start_receiver, const rclcpp::NodeOptions& options = rclcpp::NodeOptions())
+        : rclcpp::Node("go2_sbus", options) {
         device_ = parameter(*this, "device", std::string("/dev/ttyS5"));
         if (device_.empty()) throw std::invalid_argument("device must not be empty");
         accept_sbus2_footer_ = parameter(*this, "accept_sbus2_footer", true);
@@ -190,9 +193,6 @@ class SbusTeleopNode final : public rclcpp::Node {
             if (receiver_ == nullptr) {
                 throw std::runtime_error("failed to allocate RC receiver");
             }
-            if (rc_receiver_init(receiver_.get()) != 0) {
-                throw std::runtime_error("failed to initialize RC receiver");
-            }
         }
 
         velocity_pub_ = create_publisher<geometry_msgs::msg::Twist>("/cmd_vel_rc", 10);
@@ -222,25 +222,47 @@ class SbusTeleopNode final : public rclcpp::Node {
             create_wall_timer(std::chrono::milliseconds(20), std::bind(&SbusTeleopNode::publish_command, this));
 
         RCLCPP_INFO(get_logger(), "遥控器节点已启动：设备=%s；等待有效SBUS帧；初始模式=被动", device_.c_str());
-        if (start_receiver && rc_receiver_set_callback(
-                receiver_.get(),
-                [](rc_receiver_t*, const rc_receiver_frame_t* frame, void* context) {
-                    static_cast<SbusFrameEvent*>(context)->push(*frame);
-                },
-                frame_event_.get()) != 0) {
-            throw std::runtime_error("failed to start SBUS UART event callback: " +
-                                        std::to_string(rc_receiver_last_error(receiver_.get())));
+        if (start_receiver) {
+            maintain_receiver();
+            receiver_timer_ = create_wall_timer(std::chrono::seconds(1),
+                std::bind(&SbusTeleopNode::maintain_receiver, this));
         }
     }
 
     public:
     ~SbusTeleopNode() override {
+        if (receiver_timer_) receiver_timer_->cancel();
         receiver_.reset();
         get_node_waitables_interface()->remove_waitable(frame_event_, nullptr);
-        if (velocity_pub_) publish_zero();
+        if (velocity_pub_ && rclcpp::ok(get_node_base_interface()->get_context())) publish_zero();
     }
 
     private:
+    void maintain_receiver() {
+        if (!receiver_ || (receiver_started_ && rc_receiver_last_error(receiver_.get()) == 0)) return;
+        receiver_started_ = false;
+        // A missing UART or a failed event worker is recoverable. Keep publishing
+        // disconnected input while the existing frame watchdog handles any loss.
+        rc_receiver_close(receiver_.get());
+        if (rc_receiver_init(receiver_.get()) == 0 && rc_receiver_set_callback(
+                receiver_.get(),
+                [](rc_receiver_t*, const rc_receiver_frame_t* frame, void* context) {
+                    static_cast<SbusFrameEvent*>(context)->push(*frame);
+                }, frame_event_.get()) == 0) {
+            receiver_started_ = true;
+            receiver_error_ = 0;
+            RCLCPP_INFO(get_logger(), "SBUS串口已就绪：设备=%s；等待有效SBUS帧", device_.c_str());
+            return;
+        }
+        const int error = rc_receiver_last_error(receiver_.get());
+        const int reported = error ? error : EIO;
+        if (receiver_error_ != reported) {
+            RCLCPP_WARN(get_logger(), "SBUS串口暂不可用：设备=%s；%s（%d）；保持未连接并自动重试",
+                device_.c_str(), std::strerror(reported), reported);
+            receiver_error_ = reported;
+        }
+    }
+
     std::uint16_t channel_value(const rc_receiver_frame_t& frame, int channel) const noexcept {
         const auto normalized = static_cast<std::uint32_t>(frame.channels[static_cast<std::size_t>(channel - 1)]);
         // Preserve the existing Go2 calibration and launch parameters, which are
@@ -655,12 +677,15 @@ class SbusTeleopNode final : public rclcpp::Node {
 
     std::shared_ptr<SbusFrameEvent> frame_event_;
     std::unique_ptr<rc_receiver_t, decltype(&rc_receiver_free)> receiver_{nullptr, rc_receiver_free};
+    bool receiver_started_{false};
+    int receiver_error_{0};
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr alive_pub_;
     rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr slot_pub_;
     rclcpp::Client<std_srvs::srv::Trigger>::SharedPtr light_client_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr velocity_pub_;
     rclcpp::Client<unitree_go2::srv::SetMode>::SharedPtr mode_client_;
     rclcpp::TimerBase::SharedPtr publish_timer_;
+    rclcpp::TimerBase::SharedPtr receiver_timer_;
 
     rc_receiver_frame_t latest_frame_{};
     bool have_frame_{false}, valid_frame_received_{false}, passive_requested_{false};

@@ -181,7 +181,7 @@ inline double seconds(SteadyClock::duration duration) { return std::chrono::dura
 enum class Backend { kMock, kSerial };
 
 // Board wiring and motor-control owner; model inference is independent.
-enum class BoardProfile { kLegacyUsb, kNewSmallcore, kNewBigcore, kNewUsbMotor };
+enum class BoardProfile { kLegacyUsb, kNewSmallcore, kNewBigcore };
 
 struct HardwareConfig {
     Backend backend{Backend::kMock};

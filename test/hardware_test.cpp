@@ -326,15 +326,12 @@ int main() {
     for (std::size_t i = 0; i < 4; i++)
         new_config.legs[i].device = uart_paths[i];
     go2::validate_hardware_config(new_config);
-    auto usb_motor_config = new_config;
-    usb_motor_config.board_profile = go2::BoardProfile::kNewUsbMotor;
-    const std::array<std::string, 4> usb_motor_paths{
+    auto alias_config = new_config;
+    alias_config.board_profile = go2::BoardProfile::kLegacyUsb;
+    const std::array<std::string, 4> alias_paths{
         "/dev/go2/motor-fr", "/dev/go2/motor-fl", "/dev/go2/motor-rr", "/dev/go2/motor-rl"};
     for (std::size_t i = 0; i < 4; i++)
-        usb_motor_config.legs[i].device = usb_motor_paths[i];
-    go2::validate_hardware_config(usb_motor_config);
-    auto alias_config = usb_motor_config;
-    alias_config.board_profile = go2::BoardProfile::kLegacyUsb;
+        alias_config.legs[i].device = alias_paths[i];
     alias_config.imu_driver = "drv_uart_iwt603";
     alias_config.imu_device = "/dev/go2/imu";
     alias_config.imu_baud = 921600;

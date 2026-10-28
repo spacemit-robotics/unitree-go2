@@ -1,10 +1,12 @@
 # Go2 on SpacemiT K3
 
-完整的方案介绍、SDK 组合下载、接线与标定步骤见 [使用说明](docs/usage.md)。
+提供 Go2 定制底板大核直连、普通 K3/CoM260 开发板 USB 两种接入方式。在 `/etc/unitree-go2/robot.yaml` 中将 `robot.board_profile` 分别设为 `new_bigcore` 或 `legacy_usb`。
+物料清单、接线、SDK 下载和完整配置与标定流程见 [使用说明](docs/usage.md)。
+Go2 定制底板的小核通信功能正在开发中，后续会推送。
 
 ## 直接运行
 
-以下命令在 K3 板端以 root 执行，SDK 位于 `/root/spacemit_robot`，使用 `new_bigcore` 配置。
+以下命令在 K3 板端以 root 执行，SDK 位于 `/root/spacemit_robot`，两种接入方式共用。
 尚未安装模型或配置本机标定时，先完成[首次准备](#首次准备)。
 
 **每次启动前，先摆好下图的蹲姿（Pose A），保持到程序完成启动。开机自启时，上电前就摆好。**
@@ -21,6 +23,7 @@ bash application/ros2/unitree-go2/scripts/start-go2.sh
 在右上角选择机器狗。也可使用 `http://板端IP:8082/` 访问。
 Android 手机可[下载并安装 Go2 App](https://archive.spacemit.com/ros2/prebuilt/unitree-go2/go2-web.apk)。
 网页中的“打开摄像头”按钮用于预览。
+未连接 SBUS 或接收串口暂不可用时，遥控器节点保持等待并自动重试，网页控制可继续使用。
 
 停止时先让机器狗蹲下，再在启动终端按 `Ctrl+C`。
 
@@ -75,8 +78,12 @@ systemctl enable --now go2.service
 
 ## 通过串口更换 Wi-Fi
 
-将 K3 调试串口（UART0 / Console）接到 Linux PC。Go2 定制板按丝印与 USB 转串口模块同名连接：
-**RX 接 RX、TX 接 TX、GND 接 GND**。
+将 K3 调试串口（UART0 / Console）接到 Linux PC，按实际板型选择对应接法：
+
+| 板型与标记依据 | 板端到 USB 转串口模块的连接 |
+| --- | --- |
+| Go2 定制底板，按该板的丝印 | RX 接 RX，TX 接 TX，GND 接 GND |
+| 普通 K3/CoM260 开发板，按信号方向 | 板端 TX 接模块 RX，板端 RX 接模块 TX，GND 接 GND |
 
 1. 在 PC 上查找设备并打开串口，将 `/dev/ttyUSB0` 替换为实际设备：
 
@@ -86,8 +93,8 @@ systemctl enable --now go2.service
    ```
 
    未安装 minicom 时执行 `sudo apt install minicom`。按 `Ctrl+A`、`O` 进入串口设置，
-   使用 `115200 8N1`，关闭硬件和软件流控。按回车后登录，默认用户名 `root`、密码 `bianbu`；
-   修改过密码则使用新密码，输入密码时不回显。
+   使用 `115200 8N1`，关闭硬件和软件流控。按回车后使用镜像提供的账号登录；
+   后续系统管理命令以 root 执行，普通用户先切换到 root 或使用 `sudo`。
 
 2. 在板端串口终端停止 Go2。服务方式执行 `systemctl stop go2.service`；
    手动运行则先停止对应程序。扫描并连接新 Wi-Fi：
@@ -138,7 +145,7 @@ B 保持暗，使用 F、E 选择常用模式；H 置中后按 C 进入：
 
 | 操作 | 按键 |
 | --- | --- |
-| 站立 / 蹲下 | G 高 / 低保持 0.5 秒 |
+| 站立 / 蹲下 | 将 G 置于高位 / 低位并保持 0.5 秒 |
 | 正常休眠 | H 置中后按 D，完成当前动作的退出过程后蹲下并进入被动 |
 | 紧急制动 | H 高 + D，不等待动作退出，直接蹲下并进入被动 |
 | 自起 | 被动或蹲下时，H 低保持 0.5 秒 |
@@ -182,7 +189,7 @@ m
 
 本机身份和标定保存在 `/etc/unitree-go2/robot.yaml`。已有配置继续使用；
 首次部署时，按[本机配置与标定](docs/usage.md#4-本机配置与标定)创建本机配置并完成 XYZ 标定。
-配置中的 `robot.board_profile` 使用 `new_bigcore`，样机标定不能直接套用到其他机器。
+板型和外设路径按实际接线设置，样机标定不能直接套用到其他机器。
 
 摄像头预览需要 FFmpeg 和 [MediaMTX riscv64](https://github.com/Fitz8863/spacemit-mediamtx/releases/tag/v1.20.1-riscv64)，
 将 `mediamtx` 放入 `/usr/local/bin/`。

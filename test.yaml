@@ -20,16 +20,16 @@ tests:
     command: |
       set -eo pipefail
       source build/envsetup.sh
-      if [[ -n "${CI_BUILD_TARGET:-}" ]]; then
-          lunch "$CI_BUILD_TARGET"
-      fi
+      # The application regression opens a simulated SBUS UART. Select its
+      # drivers even when the CI package build did not specify a target.
+      lunch "${CI_BUILD_TARGET:-k3-com260-unitree-go2}"
       # Reach the model archive directly instead of inheriting an outbound proxy.
       NO_PROXY="${NO_PROXY:+${NO_PROXY},}archive.spacemit.com" \
       no_proxy="${no_proxy:+${no_proxy},}archive.spacemit.com" \
           python3 "$SROBOTIS_TEST_MODULE/scripts/download_models_go2.py"
       (
           cd "$SROBOTIS_TEST_MODULE"
-          mm -j4 -DBUILD_TESTING=ON
+          mm --with-deps -j4 -DBUILD_TESTING=ON
       )
       # shellcheck disable=SC1090
       source "$ROS_SETUP"

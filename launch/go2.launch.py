@@ -65,7 +65,7 @@ def _make_node(context):
                 raise RuntimeError(f"Board-local config requires 12 finite values for {key}")
     model = LaunchConfiguration("model").perform(context)
     if (
-        board_profile not in ("legacy_usb", "new_smallcore", "new_bigcore", "new_usbmotor")
+        board_profile not in ("legacy_usb", "new_smallcore", "new_bigcore")
         or board_profile not in profiles
     ):
         raise RuntimeError("unknown board_profile: " + board_profile)
@@ -273,7 +273,7 @@ def generate_launch_description():
             DeclareLaunchArgument(
                 "board_profile",
                 default_value="",
-                choices=["", "legacy_usb", "new_smallcore", "new_bigcore", "new_usbmotor"],
+                choices=["", "legacy_usb", "new_smallcore", "new_bigcore"],
             ),
             # Empty keeps the legacy IWT603 default; new boards use fixed BMI270.
             DeclareLaunchArgument("imu", default_value="", choices=["", "iwt603", "bmi270"]),

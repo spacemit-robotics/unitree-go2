@@ -243,7 +243,7 @@ matrix = list(bmi["imu_to_body_matrix"])
 assert q == [0.0, 0.0, 0.0, 1.0]
 assert matrix == [-1.0, 0.0, 0.0, 0.0, -1.0, 0.0, 0.0, 0.0, 1.0]
 assert bmi["imu_roll_offset_deg"] == bmi["imu_pitch_offset_deg"] == 0.0
-for board in ("new_smallcore", "new_bigcore", "new_usbmotor"):
+for board in ("new_smallcore", "new_bigcore"):
     params = resolve(board_profile=board)
     expected_driver = "go2_smallcore" if board == "new_smallcore" else "drv_485_m8010a"
     assert params[0]["motor_driver"] == expected_driver
@@ -256,9 +256,7 @@ for board in ("new_smallcore", "new_bigcore", "new_usbmotor"):
     assert list(params[0]["imu_to_body_quaternion_wxyz"]) == q
     assert list(params[0]["imu_to_body_matrix"]) == matrix
     expected = ["go2-motor-" + leg for leg in ("rl", "rr", "fl", "fr")] if board == "new_smallcore" else (
-        ["/dev/ttyS8", "/dev/ttyS5", "/dev/ttyS6", "/dev/ttyS3"] if board == "new_bigcore" else [
-            "/dev/go2/motor-fr", "/dev/go2/motor-fl", "/dev/go2/motor-rr", "/dev/go2/motor-rl",
-        ]
+        ["/dev/ttyS8", "/dev/ttyS5", "/dev/ttyS6", "/dev/ttyS3"]
     )
     assert list(params[0]["serial_devices"]) == expected
     for wrong in ({"imu": "iwt603"}, {"imu_driver": "drv_uart_iwt603"}, {"motor_driver": "wrong"}):

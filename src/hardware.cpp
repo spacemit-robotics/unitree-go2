@@ -1504,7 +1504,7 @@ ImuSample imu_sample_to_body(const ImuSample &sensor, const HardwareConfig &conf
 
 void validate_hardware_config(const HardwareConfig &c) {
     if (c.board_profile != BoardProfile::kLegacyUsb && c.board_profile != BoardProfile::kNewBigcore &&
-        c.board_profile != BoardProfile::kNewSmallcore && c.board_profile != BoardProfile::kNewUsbMotor)
+        c.board_profile != BoardProfile::kNewSmallcore)
         throw std::invalid_argument("unknown board profile");
     if (c.board_profile != BoardProfile::kLegacyUsb && c.imu_driver != "drv_spi_bmi270")
         throw std::invalid_argument("new boards require BMI270");
