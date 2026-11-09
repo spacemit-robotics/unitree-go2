@@ -938,6 +938,21 @@ Commands Controller::mode_commands(const RobotState &s, TimePoint now) {
 
         if (mode_ == Mode::kWave || mode_ == Mode::kSit) {
             Commands commands{};
+            if (config_.smallcore_pd) {
+                const auto &spec = config_.policy_adapter->spec_for(mode_);
+                const auto gains = config_.policy_adapter->policy_gains(mode_);
+                for (std::size_t i = 0; i < kNumJoints; ++i) {
+                    const auto index = spec.mapping[i];
+                    commands[index].mode = MotorMode::kFoc;
+                    commands[index].position_rad = commanded[index];
+                    commands[index].kp = gains.kp[i];
+                    commands[index].kd = gains.kd[i];
+                    commands[index].local_pd = true;
+                    commands[index].effort_limit = spec.effort_limit[i];
+                    commands[index].velocity_limit = spec.velocity_limit;
+                }
+                return remember(commands);
+            }
             const auto torques = config_.policy_adapter->policy_torques(commanded, s, mode_);
             for (std::size_t i = 0; i < kNumJoints; ++i) {
                 commands[i].mode = MotorMode::kFoc;

@@ -37,6 +37,7 @@ class PolicyAdapter;
 struct ControllerConfig {
     std::shared_ptr<const PolicyAdapter> policy_adapter;
     std::vector<Joints> sit_reference;
+    bool smallcore_pd{false};
     double motor_soft_timeout{.22}, motor_hard_timeout{.30};
     // New-bigcore/new-smallcore reply loss is recoverable in the motor worker.
     // Keep the bounded freshness grace for all four legs; the field names are

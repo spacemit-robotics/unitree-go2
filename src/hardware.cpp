@@ -4,6 +4,8 @@
  */
 #include "hardware.hpp"
 #include <fcntl.h>
+#include <glob.h>
+#include <limits.h>
 #include <poll.h>
 #include <sys/file.h>
 #include <sys/ioctl.h>
@@ -34,8 +36,10 @@ constexpr std::uint8_t GO2_RPC_HELLO = 1U;
 constexpr std::uint8_t GO2_RPC_SET = 2U;
 constexpr std::uint8_t GO2_RPC_STOP = 3U;
 constexpr std::uint8_t GO2_RPC_GET = 4U;
+constexpr std::uint8_t GO2_RPC_SET_PD = 5U;
 constexpr std::uint32_t GO2_RPC_FAULT = 1U;
 constexpr std::uint32_t GO2_RPC_STOPPED = 2U;
+constexpr std::uint32_t GO2_RPC_HAS_LOCAL_PD = 4U;
 constexpr std::uint32_t GO2_RPC_RCPU_BASE = 1100U;
 constexpr std::uint32_t GO2_RPC_LINUX_BASE = 1200U;
 
@@ -157,6 +161,16 @@ RotorCommand joint_to_rotor_command(const JointCommand &command, const JointCali
     rotor.torque_nm = direction * command.torque_nm / ratio;
     rotor.kp = command.kp / (ratio * ratio);
     rotor.kd = command.kd / (ratio * ratio);
+    if (command.local_pd) {
+        if (!finite(command.effort_limit) || command.effort_limit <= 0 ||
+            !finite(command.velocity_limit) || command.velocity_limit <= 0)
+            throw std::invalid_argument("local PD requires finite positive motor limits");
+        rotor.local_pd = true;
+        rotor.effort_limit = command.effort_limit / ratio;
+        rotor.velocity_limit = command.velocity_limit * ratio;
+        if (!finite(rotor.effort_limit) || !finite(rotor.velocity_limit))
+            throw std::invalid_argument("local PD motor limits overflow after calibration");
+    }
     return rotor;
 }
 
@@ -352,6 +366,7 @@ struct RpmsgSession {
     uint32_t seq;
     uint64_t session;
     int failed;
+    uint32_t capabilities{};
     TimePoint command_sent_at{};
 };
 static int64_t rpmsg_milliseconds(void) {
@@ -372,9 +387,63 @@ static int rpmsg_endpoint_address(unsigned index, const char *attribute, unsigne
     unsigned long actual = strtoul(value, &end, 10);
     return end != value && (*end == '\n' || *end == '\0') && actual == expected;
 }
-static int rpmsg_endpoint(const char *service, unsigned leg) {
+static bool rpmsg_on_bus(const char *path, const char *bus) {
+    char resolved[PATH_MAX], component[48];
+    if (!realpath(path, resolved))
+        return false;
+    snprintf(component, sizeof(component), "/%s/", bus);
+    return strstr(resolved, component) != nullptr;
+}
+static bool rpmsg_service_bus(const char *service, char *bus, size_t capacity) {
+    char pattern[160];
+    glob_t channels{};
+    snprintf(pattern, sizeof(pattern), "/sys/bus/rpmsg/devices/*.%s.*", service);
+    if (glob(pattern, 0, nullptr, &channels)) {
+        globfree(&channels);
+        errno = ENODEV;
+        return false;
+    }
+    bus[0] = '\0';
+    for (size_t i = 0; i < channels.gl_pathc; ++i) {
+        const char *name = strrchr(channels.gl_pathv[i], '/');
+        name = name ? name + 1 : channels.gl_pathv[i];
+        const char *end = strchr(name, '.');
+        if (!end || strncmp(name, "virtio", 6) || static_cast<size_t>(end - name) >= capacity) {
+            globfree(&channels);
+            errno = EPROTO;
+            return false;
+        }
+        const std::string candidate(name, end);
+        if (bus[0] && candidate != bus) {
+            globfree(&channels);
+            errno = EBUSY;
+            return false;
+        }
+        snprintf(bus, capacity, "%s", candidate.c_str());
+    }
+    globfree(&channels);
+    return bus[0] != '\0';
+}
+static int rpmsg_control(const char *bus) {
+    for (unsigned i = 0; i < 256; ++i) {
+        char path[128];
+        snprintf(path, sizeof(path), "/sys/class/rpmsg/rpmsg_ctrl%u", i);
+        if (!rpmsg_on_bus(path, bus))
+            continue;
+        snprintf(path, sizeof(path), "/dev/rpmsg_ctrl%u", i);
+        return open(path, O_RDWR | O_CLOEXEC);
+    }
+    errno = ENODEV;
+    return -1;
+}
+static int rpmsg_endpoint(const char *service, unsigned leg, const char *bus = nullptr) {
     for (unsigned i = 0; i < 256; i++) {
         char path[128], name[64] = {0};
+        if (bus) {
+            snprintf(path, sizeof(path), "/sys/class/rpmsg/rpmsg%u", i);
+            if (!rpmsg_on_bus(path, bus))
+                continue;
+        }
         snprintf(path, sizeof(path), "/sys/class/rpmsg/rpmsg%u/name", i);
         int f = open(path, O_RDONLY | O_CLOEXEC);
         if (f < 0)
@@ -405,7 +474,7 @@ static int rpmsg_exchange(RpmsgSession *p, uint8_t op, const uint8_t *frame, uin
     for (;;) {
         ssize_t n = write(p->fd, q, sizeof(q));
         if (n == (ssize_t)sizeof(q)) {
-            if (op == GO2_RPC_SET)
+            if (op == GO2_RPC_SET || op == GO2_RPC_SET_PD)
                 p->command_sent_at = SteadyClock::now();
             break;
         }
@@ -460,6 +529,8 @@ RpmsgSession *rpmsg_open(const char *service) {
     unsigned leg;
     int ret;
     uint8_t stale[512];
+    uint8_t hello[GO2_RPC_SIZE];
+    char bus[32];
     for (leg = 0; leg < 4; leg++)
         if (!strcmp(names[leg], service))
             break;
@@ -467,11 +538,13 @@ RpmsgSession *rpmsg_open(const char *service) {
         errno = EINVAL;
         return NULL;
     }
+    if (!rpmsg_service_bus(service, bus, sizeof(bus)))
+        return NULL;
     auto *p = new (std::nothrow) RpmsgSession{};
     if (!p)
         return NULL;
     p->leg = (uint8_t)leg;
-    p->fd = rpmsg_endpoint(service, leg);
+    p->fd = rpmsg_endpoint(service, leg, bus);
     if (p->fd < 0) {
         struct endpoint_info {
             char name[32];
@@ -480,7 +553,7 @@ RpmsgSession *rpmsg_open(const char *service) {
         strcpy(info.name, service);
         info.src = GO2_RPC_LINUX_BASE + leg;
         info.dst = GO2_RPC_RCPU_BASE + leg;
-        int ctrl = open("/dev/rpmsg_ctrl0", O_RDWR | O_CLOEXEC);
+        int ctrl = rpmsg_control(bus);
         if (ctrl < 0)
             goto fail;
         int ret = ioctl(ctrl, _IOW(0xb5, 1, struct endpoint_info), &info);
@@ -492,7 +565,7 @@ RpmsgSession *rpmsg_open(const char *service) {
         }
         for (int attempt = 0; attempt < 50 && p->fd < 0; attempt++) {
             usleep(20000);
-            p->fd = rpmsg_endpoint(service, leg);
+            p->fd = rpmsg_endpoint(service, leg, bus);
         }
     }
     if (p->fd < 0 || flock(p->fd, LOCK_EX | LOCK_NB) < 0)
@@ -502,11 +575,12 @@ RpmsgSession *rpmsg_open(const char *service) {
     for (unsigned i = 0; i < 256; i++)
         if (read(p->fd, stale, sizeof(stale)) <= 0)
             break;
-    ret = rpmsg_exchange(p, GO2_RPC_HELLO, NULL, NULL);
+    ret = rpmsg_exchange(p, GO2_RPC_HELLO, NULL, hello);
     if (ret < 0) {
         errno = -ret;
         goto fail;
     }
+    p->capabilities = go2_get32(hello + 20);
     return p;
 fail:
     {
@@ -519,49 +593,9 @@ fail:
     }
 }
 
-int rpmsg_set(RpmsgSession *p, const RotorCommand commands[3]) {
-    uint8_t records[120] = {0};
-    if (!p || !commands)
-        return -EINVAL;
-    if (p->failed)
-        return -EIO;
-    for (unsigned id = 0; id < 3; ++id) {
-        const RotorCommand *c = &commands[id];
-        if (c->mode != MotorMode::kBrake && c->mode != MotorMode::kFoc)
-            return -EINVAL;
-        if (c->mode == MotorMode::kBrake)
-            continue;
-        if (!std::isfinite(c->torque_nm) || !std::isfinite(c->velocity_rad_s) || !std::isfinite(c->position_rad) ||
-            !std::isfinite(c->kp) || !std::isfinite(c->kd) || c->kp < 0 || c->kd < 0)
-            return -EINVAL;
-        uint8_t *r = records + id * 40;
-        go2_put32(r, 1);
-        go2_put_float(r + 4, c->torque_nm);
-        go2_put_float(r + 8, c->velocity_rad_s);
-        go2_put_float(r + 12, c->position_rad);
-        go2_put_float(r + 16, c->kp);
-        go2_put_float(r + 20, c->kd);
-    }
-    int result = rpmsg_exchange(p, GO2_RPC_SET, records, NULL);
-    if (result < 0 && result != -ETIMEDOUT)
-        p->failed = 1;
-    return result;
-}
-int rpmsg_get(RpmsgSession *p, RpmsgSnapshot *out) {
-    uint8_t response[GO2_RPC_SIZE];
-    if (!out)
-        return -EINVAL;
-    *out = {};
-    if (!p || p->failed)
-        return -EIO;
-    int64_t start = rpmsg_milliseconds();
-    int result = rpmsg_exchange(p, GO2_RPC_GET, NULL, response);
-    if (result < 0) {
-        if (result != -ETIMEDOUT)
-            p->failed = 1;
-        return result;
-    }
+int rpmsg_decode_snapshot(RpmsgSession *p, const uint8_t response[GO2_RPC_SIZE], int64_t start, RpmsgSnapshot *out) {
     RpmsgSnapshot snapshot{};
+    *out = {};
     snapshot.flags = go2_get32(response + 20);
     snapshot.accepted_sequence = go2_get32(response + 24);
     snapshot.sweeps = go2_get32(response + 28);
@@ -594,6 +628,71 @@ int rpmsg_get(RpmsgSession *p, RpmsgSnapshot *out) {
     }
     *out = snapshot;
     return 0;
+}
+
+int rpmsg_set(RpmsgSession *p, const RotorCommand commands[3], RpmsgSnapshot *out = nullptr) {
+    uint8_t records[120] = {0};
+    uint8_t response[GO2_RPC_SIZE];
+    if (out)
+        *out = {};
+    if (!p || !commands)
+        return -EINVAL;
+    if (p->failed)
+        return -EIO;
+    bool local_pd = false;
+    for (unsigned id = 0; id < 3; ++id)
+        local_pd = local_pd || (commands[id].mode == MotorMode::kFoc && commands[id].local_pd);
+    if (local_pd && !(p->capabilities & GO2_RPC_HAS_LOCAL_PD))
+        return -ENOTSUP;
+    for (unsigned id = 0; id < 3; ++id) {
+        const RotorCommand *c = &commands[id];
+        if (c->mode != MotorMode::kBrake && c->mode != MotorMode::kFoc)
+            return -EINVAL;
+        if (c->mode == MotorMode::kBrake)
+            continue;
+        if (c->local_pd != local_pd)
+            return -EINVAL;
+        if (!std::isfinite(c->torque_nm) || !std::isfinite(c->velocity_rad_s) || !std::isfinite(c->position_rad) ||
+            !std::isfinite(c->kp) || !std::isfinite(c->kd) || c->kp < 0 || c->kd < 0)
+            return -EINVAL;
+        uint8_t *r = records + id * 40;
+        go2_put32(r, 1);
+        go2_put_float(r + 4, c->torque_nm);
+        go2_put_float(r + 8, c->velocity_rad_s);
+        go2_put_float(r + 12, c->position_rad);
+        go2_put_float(r + 16, c->kp);
+        go2_put_float(r + 20, c->kd);
+        if (local_pd) {
+            if (!std::isfinite(c->effort_limit) || c->effort_limit <= 0 ||
+                !std::isfinite(c->velocity_limit) || c->velocity_limit <= 0)
+                return -EINVAL;
+            go2_put_float(r + 24, c->effort_limit);
+            go2_put_float(r + 28, c->velocity_limit);
+        }
+    }
+    const int64_t start = rpmsg_milliseconds();
+    int result = rpmsg_exchange(p, local_pd ? GO2_RPC_SET_PD : GO2_RPC_SET, records, out ? response : nullptr);
+    if (result < 0 && result != -ETIMEDOUT)
+        p->failed = 1;
+    if (result == 0 && out)
+        return rpmsg_decode_snapshot(p, response, start, out);
+    return result;
+}
+int rpmsg_get(RpmsgSession *p, RpmsgSnapshot *out) {
+    uint8_t response[GO2_RPC_SIZE];
+    if (!out)
+        return -EINVAL;
+    *out = {};
+    if (!p || p->failed)
+        return -EIO;
+    int64_t start = rpmsg_milliseconds();
+    int result = rpmsg_exchange(p, GO2_RPC_GET, NULL, response);
+    if (result < 0) {
+        if (result != -ETIMEDOUT)
+            p->failed = 1;
+        return result;
+    }
+    return rpmsg_decode_snapshot(p, response, start, out);
 }
 int rpmsg_stop(RpmsgSession *p) {
     if (!p)
@@ -1317,7 +1416,17 @@ void MotorBank::run_rpmsg_leg(std::size_t leg_index) {
             std::array<std::uint32_t, kMotorsPerLeg> previous_samples{};
             bool previously_forced = false;
             bool previously_expired = false;
+            auto next_sweep = SteadyClock::now();
             while (running_.load()) {
+                // The UART worker keeps its own 2 ms scan. Linux exchanges
+                // are paced independently of policy updates.
+                next_sweep += std::chrono::milliseconds(1);
+                const auto sweep_started = SteadyClock::now();
+                if (next_sweep < sweep_started)
+                    next_sweep = sweep_started;
+                std::this_thread::sleep_until(next_sweep);
+                if (!running_.load())
+                    break;
                 std::array<JointCommand, kMotorsPerLeg> commands;
                 std::uint64_t generation;
                 SteadyClock::time_point command_at;
@@ -1342,14 +1451,17 @@ void MotorBank::run_rpmsg_leg(std::size_t leg_index) {
                     const auto rotor = anchor.to_rotor_command(commands[id], config.calibration[id]);
                     targets[id] = rotor;
                 }
-                // Reading snapshots does not retransmit targets or keep an old FOC alive.
+                bool have_snapshot = false;
+                // SET already returns a complete snapshot. Reuse it to avoid a
+                // second round trip in the feedback-dependent torque loop.
+                // GET alone never retransmits targets or renews the watchdog.
                 if (generation != sent_generation || forced != previously_forced ||
                     command_expired != previously_expired) {
                     for (const auto &target : targets)
                         if (target.mode == MotorMode::kFoc)
                             active_control_started_.store(true);
                     const auto previous_sent_at = channel->command_sent_at;
-                    const int set_result = rpmsg_set(channel.get(), targets.data());
+                    const int set_result = rpmsg_set(channel.get(), targets.data(), &state);
                     if ((set_result == 0 || set_result == -ETIMEDOUT) &&
                         channel->command_sent_at > previous_sent_at) {
                         std::lock_guard<std::mutex> lock(runtime.mutex);
@@ -1367,8 +1479,9 @@ void MotorBank::run_rpmsg_leg(std::size_t leg_index) {
                     sent_generation = generation;
                     previously_forced = forced;
                     previously_expired = command_expired;
+                    have_snapshot = true;
                 }
-                const int get_result = rpmsg_get(channel.get(), &state);
+                const int get_result = have_snapshot ? 0 : rpmsg_get(channel.get(), &state);
                 if (get_result == -ETIMEDOUT) {
                     std::lock_guard<std::mutex> lock(runtime.mutex);
                     ++runtime.transaction_failures;
@@ -1418,7 +1531,6 @@ void MotorBank::run_rpmsg_leg(std::size_t leg_index) {
                     runtime.error =
                         session_anchor_faulted_.load() ? "session anchor invalidated; restart to rebuild anchors" : "";
                 }
-                std::this_thread::sleep_for(std::chrono::milliseconds(5));
             }
         } catch (const std::exception &error) {
             // Firmware faults are sticky. Never silently resume active control

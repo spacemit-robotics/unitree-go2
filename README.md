@@ -1,12 +1,12 @@
 # Go2 on SpacemiT K3
 
-提供 Go2 定制底板大核直连、普通 K3/CoM260 开发板 USB 两种接入方式。在 `/etc/unitree-go2/robot.yaml` 中将 `robot.board_profile` 分别设为 `new_bigcore` 或 `legacy_usb`。
+支持 Go2 定制底板和普通 K3/CoM260 开发板 USB 两种硬件方案。定制底板的大小核模式共用接线，在 `/etc/unitree-go2/robot.yaml` 中将 `robot.board_profile` 设为 `new_bigcore`（大核直连）或 `new_smallcore`（小核电机通信）；USB 方案使用 `legacy_usb`。
 物料清单、接线、SDK 下载和完整配置与标定流程见 [使用说明](docs/usage.md)。
-Go2 定制底板的小核通信功能正在开发中，后续会推送。
+小核模式需预装匹配的 G2MR v2 电机服务固件，模型推理仍在 Linux 大核运行。
 
 ## 直接运行
 
-以下命令在 K3 板端以 root 执行，SDK 位于 `/root/spacemit_robot`，两种接入方式共用。
+以下命令在 K3 板端以 root 执行，SDK 位于 `/root/spacemit_robot`，两种硬件方案共用。
 尚未安装模型或配置本机标定时，先完成[首次准备](#首次准备)。
 
 **每次启动前，先摆好下图的蹲姿（Pose A），保持到程序完成启动。开机自启时，上电前就摆好。**

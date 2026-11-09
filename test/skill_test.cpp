@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 #include "controller.hpp"
+#include "policy_adapter.hpp"
 #include "support.hpp"
 #include <iostream>
 
@@ -28,6 +29,35 @@ void frame(go2::Controller &c, double time, bool tilted = false) {
 } // namespace
 int main() {
     go2::ControllerConfig config = test_controller_config();
+    // Both transports must preserve the policy's joint mapping and actuator limits.
+    for (auto mode : {Mode::kWave, Mode::kSit}) {
+        for (bool smallcore : {false, true}) {
+            auto transport_config = config;
+            transport_config.smallcore_pd = smallcore;
+            go2::Controller c(transport_config);
+            start(c, mode);
+            auto state = fresh(2.02);
+            auto request = c.prepare_policy(state, at(2.02));
+            assert(request);
+            c.complete_policy(*request, {}, at(2.02));
+            const auto commands = c.tick(state, at(2.02));
+            const auto &spec = config.policy_adapter->spec_for(mode);
+            const auto gains = config.policy_adapter->policy_gains(mode);
+            for (std::size_t i = 0; i < go2::kNumJoints; ++i) {
+                const auto &command = commands[spec.mapping[i]];
+                assert(command.mode == go2::MotorMode::kFoc);
+                assert(command.local_pd == smallcore);
+                if (smallcore) {
+                    assert(command.kp == gains.kp[i] && command.kd == gains.kd[i]);
+                    assert(command.effort_limit == spec.effort_limit[i]);
+                    assert(command.velocity_limit == spec.velocity_limit);
+                    assert(command.torque_nm == 0);
+                } else {
+                    assert(command.kp == 0 && command.kd == 0);
+                }
+            }
+        }
+    }
     // Accepted actions own the wave clock. Rejected work must not skip a reference frame.
     {
         go2::Controller c(config);
