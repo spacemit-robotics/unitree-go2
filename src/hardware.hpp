@@ -53,6 +53,9 @@ struct JointCommand {
     bool protective_crouch_final{false};
     // Native UART workers use a 5 ms sweep only during front/back/side flips.
     bool flip_uart_pacing{false};
+    // Smallcore evaluates PD and the training torque-speed envelope locally.
+    bool local_pd{false};
+    float effort_limit{0.0F}, velocity_limit{0.0F};
 };
 
 struct RotorCommand {
@@ -63,6 +66,8 @@ struct RotorCommand {
     float position_rad{0.0F};
     float kp{0.0F};
     float kd{0.0F};
+    bool local_pd{false};
+    float effort_limit{0.0F}, velocity_limit{0.0F};
 };
 
 struct RotorFeedback {

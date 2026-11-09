@@ -144,6 +144,7 @@ Node::Node() : rclcpp::Node("go2") {
     }
 
     ControllerConfig c;
+    c.smallcore_pd = h.board_profile == BoardProfile::kNewSmallcore;
     c.rr_uart6_degraded = h.board_profile == BoardProfile::kNewBigcore ||
         h.board_profile == BoardProfile::kNewSmallcore;
     c.motor_soft_timeout = parameter(*this, "motor_state_timeout_sec", c.motor_soft_timeout);
