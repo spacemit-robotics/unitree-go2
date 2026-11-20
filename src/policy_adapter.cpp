@@ -420,9 +420,16 @@ PolicyAdapter::PolicyAdapter(const std::string& path, const std::string& directo
     if (!modes.IsMap()) throw std::invalid_argument("missing go2_modes");
     for (const auto& entry : modes) {
         const auto mode = parse_mode(entry.first.as<std::string>());
-        if (mode == Mode::kStand || mode == Mode::kPassive || mode == Mode::kCrouch || mode == Mode::kRollover)
+        if (mode == Mode::kStand || mode == Mode::kPassive || mode == Mode::kCrouch)
             throw std::invalid_argument("pose mode cannot have a policy");
         if (models_.count(mode)) throw std::invalid_argument("duplicate mode configuration");
+        if (mode == Mode::kDance) {
+            const auto motion = entry.second["motion"];
+            if (!motion || motion["frames"].as<unsigned>() != kDanceReferenceFrames)
+                throw std::invalid_argument("dance requires its 1001-frame reference");
+            dance_reference_ = load_motion_reference(
+                (fs::path(path).parent_path() / motion["path"].as<std::string>()).string(), kDanceReferenceFrames);
+        }
         auto& variants = models_[mode];
         for (const auto& name : entry.second["models"].as<std::vector<std::string>>()) {
             ModelSpec spec;
@@ -469,12 +476,14 @@ PolicyAdapter::PolicyAdapter(const std::string& path, const std::string& directo
             spec.last_action_scale = joint_values(node, "last_action_scale", 1);
             spec.lower = joint_values(node, "joint_lower", -1000);
             spec.upper = joint_values(node, "joint_upper", 1000);
-            if (mode == Mode::kWave || mode == Mode::kSit) {
+            if (mode == Mode::kWave || mode == Mode::kSit || mode == Mode::kRollover || mode == Mode::kDance) {
                 spec.effort_limit = joint_values(node, "effort_limit", 0);
-                spec.velocity_limit = node["velocity_limit"].as<float>();
                 for (float limit : spec.effort_limit)
                     if (!std::isfinite(limit) || limit <= 0)
                         throw std::invalid_argument("invalid policy effort limits");
+            }
+            if (mode == Mode::kWave || mode == Mode::kSit) {
+                spec.velocity_limit = node["velocity_limit"].as<float>();
                 if (!std::isfinite(spec.velocity_limit) || spec.velocity_limit <= 0)
                     throw std::invalid_argument("invalid policy velocity limit");
             }
@@ -497,15 +506,17 @@ PolicyAdapter::PolicyAdapter(const std::string& path, const std::string& directo
             std::unordered_map<std::string, int> custom_dimensions;
             if (mode == Mode::kWave || mode == Mode::kSit)
                 custom_dimensions = {{"reference_delta", 12}, {"reference_phase", 2}};
-            else if (mode == Mode::kForwardJump)
+            else if (mode == Mode::kForwardJump || mode == Mode::kDance)
                 custom_dimensions = {
                     {"reference_position", 12}, {"reference_velocity", 12}, {"reference_orientation", 6}};
+            else if (mode == Mode::kRollover)
+                custom_dimensions = {{"recovery_phase", 1}};
             if (cfg.custom_array_dims != custom_dimensions)
                 throw std::invalid_argument(name + ": custom observation dimensions do not match Go2 reference terms");
             const auto dimensions = ObservationTermDimensions(cfg);
             const int frame_dim = std::accumulate(dimensions.begin(), dimensions.end(), 0);
             const int expected = (mode == Mode::kWave || mode == Mode::kSit) ? 56
-                : mode == Mode::kForwardJump ? 69 : 45;
+                : (mode == Mode::kForwardJump || mode == Mode::kDance) ? 69 : mode == Mode::kRollover ? 43 : 45;
             if (frame_dim != expected) throw std::invalid_argument(name + ": unexpected observation frame dimension");
             if (!history && !segment.mode.empty()) throw std::invalid_argument(name + ": unexpected history segment");
             const std::set<std::string> builtins{"ang_vel", "gravity", "command", "dof_pos", "dof_vel", "last_action"};
@@ -540,8 +551,10 @@ rl_policy::PolicyExecutor& PolicyAdapter::executor(Mode mode) const {
     model->Init(config);
     if (model->ActionDim() != static_cast<int>(kNumJoints))
         throw std::invalid_argument("Go2 policy must output 12 actions");
-    if (mode == Mode::kForwardJump && model->ObsDim() != 69)
+    if ((mode == Mode::kForwardJump || mode == Mode::kDance) && model->ObsDim() != 69)
         throw std::invalid_argument("Go2 motion tracking requires 69 observation values");
+    if (mode == Mode::kRollover && model->ObsDim() != 43)
+        throw std::invalid_argument("Go2 rollover requires 43 observation values");
     auto& result = *model;
     executors_.emplace(mode, std::move(model));
     return result;
@@ -648,6 +661,22 @@ Joints PolicyAdapter::action_to_hardware_targets(const Action& action, Mode mode
     const std::vector<Joints>& sit_trajectory, std::size_t variant_index) const {
     Joints target{};
     if (mode == Mode::kSit) return sit_hardware_targets(sit_trajectory, action, reference_time);
+    if (mode == Mode::kDance) {
+        if (!std::isfinite(reference_time) || reference_time < 0)
+            throw std::invalid_argument("invalid dance reference time");
+        const auto frame = static_cast<std::uint64_t>(std::llround(reference_time / kSkillControlDt));
+        const auto &reference = dance_reference(frame);
+        const auto &spec = spec_for(mode);
+        const auto &scales = spec.loaded.exec_cfg.action_scale;
+        for (std::size_t i = 0; i < kNumJoints; ++i) {
+            if (!std::isfinite(action[i]))
+                throw std::invalid_argument("non-finite dance action");
+            target[spec.mapping[i]] = std::clamp(reference.position[i] +
+                    float(scales[scales.size() == 1 ? 0 : i]) * std::clamp(action[i], -spec.target_clip, spec.target_clip),
+                spec.lower[i], spec.upper[i]);
+        }
+        return target;
+    }
     if (mode == Mode::kWave) {
         const auto reference = wave_reference(reference_time);
         const auto& spec = spec_for(mode);
@@ -670,7 +699,16 @@ Joints PolicyAdapter::action_to_hardware_targets(const Action& action, Mode mode
     }
     MapPolicyActionToTargetPos(spec.loaded.exec_cfg, values, mapped);
     std::copy(mapped.begin(), mapped.end(), target.begin());
+    if (mode == Mode::kRollover)
+        for (std::size_t i = 0; i < kNumJoints; ++i)
+            target[spec.mapping[i]] = std::clamp(target[spec.mapping[i]], spec.lower[i], spec.upper[i]);
     return target;
+}
+
+const MotionReference &PolicyAdapter::dance_reference(std::uint64_t frame) const {
+    if (dance_reference_.empty())
+        throw std::logic_error("dance reference is not loaded");
+    return dance_reference_[std::min<std::uint64_t>(frame, dance_reference_.size() - 1U)];
 }
 
 GainSet PolicyAdapter::policy_gains(Mode mode, std::size_t variant_index) const {
@@ -839,6 +877,10 @@ Joints PolicyAdapter::policy_torques(const Joints& target, const RobotState& sta
         const float raw = gains.kp[policy_index] * (target[i] - feedback.position_rad) -
             gains.kd[policy_index] * feedback.velocity_rad_s;
         const float effort_limit = spec.effort_limit[policy_index];
+        if (mode == Mode::kRollover || mode == Mode::kDance) {
+            torque[i] = std::clamp(raw, -effort_limit, effort_limit);
+            continue;
+        }
 
         const float velocity = std::clamp(feedback.velocity_rad_s, -2.0F * velocity_limit, 2.0F * velocity_limit);
         const float upper = std::min(effort_limit * (1.0F - velocity / velocity_limit), effort_limit);
@@ -858,7 +900,22 @@ using namespace detail;  // NOLINT(build/namespaces)
 // ============================================================================
 
 std::vector<float> PolicyAdapter::build_observation(const RobotState& state, VelocityCommand command,
-    const Action& previous, Mode mode, float reference_time, const std::vector<Joints>& sit_trajectory) const {
+    const Action& previous, Mode mode, float reference_time, const std::vector<Joints>& sit_trajectory,
+    std::uint64_t policy_frame) const {
+    if (mode == Mode::kRollover) {
+        constexpr float kPhaseFrames = 185.F;
+        const auto& spec = spec_for(mode);
+        Action last_action = previous;
+        if (policy_frame == 0) {
+            const auto& scales = spec.loaded.exec_cfg.action_scale;
+            for (std::size_t i = 0; i < kNumJoints; ++i) {
+                const auto position = state.motors.joints[spec.mapping[i]].feedback.position_rad;
+                last_action[i] = (position - spec.default_pos[i]) / scales[scales.size() == 1 ? 0 : i];
+            }
+        }
+        return observation_frame(mode, state, {}, last_action, spec,
+            {{"recovery_phase", {std::min(float(policy_frame) / kPhaseFrames, 1.F)}}});
+    }
     const auto observed_command = command_for_mode(command, mode);
     if (mode == Mode::kWalk || mode == Mode::kTerrain)
         return observation_frame(mode, state, observed_command, previous, spec_for(mode));
@@ -872,7 +929,7 @@ std::vector<float> PolicyAdapter::build_observation(const RobotState& state, Vel
                 {"reference_phase", {std::sin(kTwoPi * reference.phase), std::cos(kTwoPi * reference.phase)}}});
     }
     if (mode == Mode::kSit) return build_sit_observation(sit_trajectory, state, previous, reference_time);
-    if (mode == Mode::kForwardJump)
+    if (mode == Mode::kForwardJump || mode == Mode::kDance)
         return build_motion_observation(mode, state, default_joint_position(mode), {}, {1, 0, 0, 0}, previous);
 
     throw std::invalid_argument("unsupported observation adapter");
@@ -889,7 +946,7 @@ Quaternion motion_yaw_alignment(const Quaternion& actual, const Quaternion& refe
 std::vector<float> PolicyAdapter::build_motion_observation(Mode mode, const RobotState& state,
     const Joints& reference_position, const Joints& reference_velocity, const Quaternion& reference_quaternion,
     const Action& previous, const Quaternion& right_yaw_alignment) const {
-    if (mode != Mode::kForwardJump) {
+    if (mode != Mode::kForwardJump && mode != Mode::kDance) {
         throw std::invalid_argument("motion observation requires a motion mode");
     }
     const auto aligned_reference = multiply(right_yaw_alignment, reference_quaternion);

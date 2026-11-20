@@ -5,6 +5,7 @@
 #include "controller.hpp"
 #include "policy_adapter.hpp"
 #include "support.hpp"
+#include <filesystem>  // NOLINT(build/c++17)
 #include <iostream>
 
 using go2::Mode;
@@ -96,6 +97,25 @@ int main() {
         for (unsigned i = 0; i < 400; ++i) frame(c, 2.44 + i * .02);
         assert(c.status().mode == Mode::kWave);
     }
+    if (std::filesystem::is_regular_file(std::filesystem::path(GO2_TEST_MODEL_DIR) / "go2_dance.onnx")) {
+        go2::Controller c(config);
+        start(c, Mode::kDance);
+        const auto& spec = config.policy_adapter->spec_for(Mode::kDance);
+        for (std::uint64_t n = 0; n < go2::kDanceFrames; ++n) {
+            const auto time = at(2.02 + n * .02);
+            const auto state = fresh(2.02 + n * .02);
+            const auto request = c.prepare_policy(state, time);
+            assert(request && request->policy_frame == n && request->observation.size() == 69U);
+            c.complete_policy(*request, {}, time);
+            const auto commands = c.tick(state, time);
+            for (std::size_t i = 0; i < go2::kNumJoints; ++i) {
+                assert(commands[spec.mapping[i]].mode == go2::MotorMode::kFoc);
+                assert(std::fabs(commands[spec.mapping[i]].torque_nm) <= spec.effort_limit[i]);
+            }
+        }
+        assert(!c.prepare_policy(fresh(24.02), at(24.02)));
+        assert(c.status().mode == Mode::kStand);
+    }
     // A queued switch cannot interrupt the jump's 120 accepted control frames.
     {
         go2::Controller c(config);
@@ -118,7 +138,7 @@ int main() {
     }
     // Different normal destinations all wait for the sitting policy to rise.
     for (auto destination :
-        {Mode::kTerrain, Mode::kForwardJump, Mode::kStand, Mode::kCrouch, Mode::kRollover}) {
+        {Mode::kTerrain, Mode::kForwardJump, Mode::kStand, Mode::kCrouch}) {
         go2::Controller c(config);
         start(c, Mode::kSit);
         for (unsigned n = 0; n < 200; ++n)
@@ -126,13 +146,10 @@ int main() {
         assert(c.status().mode == Mode::kSit); // No automatic four-second stand.
         auto old = c.prepare_policy(fresh(6.02), at(6.02));
         assert(old);
-        auto requested_state = fresh(6.02);
-        if (destination == Mode::kRollover) {
-            assert(!c.set_mode(destination, requested_state, at(6.02)).accepted);
-            requested_state.imu.quaternion = {0.819152F, 0.573576F, 0.0F, 0.0F};
-            requested_state.imu.six_axis_quaternion = requested_state.imu.quaternion;
-        }
-        assert(c.set_mode(destination, requested_state, at(6.02)).accepted);
+        auto supine = fresh(6.02);
+        supine.imu.quaternion = {0.F, 1.F, 0.F, 0.F};
+        assert(!c.set_mode(Mode::kRollover, supine, at(6.02)).accepted);
+        assert(c.set_mode(destination, fresh(6.02), at(6.02)).accepted);
         c.complete_policy(*old, {}, at(6.02));
         auto first = c.prepare_policy(fresh(6.02), at(6.02));
         assert(first && first->generation != old->generation && first->policy_frame == 200);
@@ -143,7 +160,7 @@ int main() {
         }
         for (unsigned n = 169; n < 195 && c.status().mode == Mode::kSit; ++n)
             frame(c, 6.02 + n * .02);
-        if (destination == Mode::kCrouch || destination == Mode::kRollover) {
+        if (destination == Mode::kCrouch) {
             assert(c.status().mode == destination);
         } else {
             assert(c.status().mode == Mode::kStand);

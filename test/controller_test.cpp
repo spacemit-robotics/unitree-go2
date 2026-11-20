@@ -5,6 +5,7 @@
 #include "controller.hpp"
 #include "policy.hpp"
 #include "support.hpp"
+#include <filesystem>  // NOLINT(build/c++17)
 #include <algorithm>
 #include <iostream>
 #include <limits>
@@ -98,7 +99,7 @@ int main() {
         const auto state = tilted_state(1, 75.F, 0.F);
         brake(passive_controller.tick(state, at(1)));
         assert(!passive_controller.status().protective_crouch);
-        assert(passive_controller.set_mode(Mode::kRollover, state, at(1)).accepted);
+        assert(passive_controller.step_rollover(state, at(1)).accepted);
         passive_controller.tick(state, at(1));
         assert(!passive_controller.status().protective_crouch);
     }
@@ -631,56 +632,56 @@ int main() {
         assert(c.status().protective_crouch);
         assert(!c.status().reason.empty());
     }
-    {
-        // The selected rollover sequence avoids inference and returns to Pose A.
-        go2::ControllerConfig config = test_controller_config();
-        go2::Controller c(config);
-        const int segments = c.status().rollover_segments;
-        assert(segments == 9);
-        stand(c);
-        assert(!c.set_mode(Mode::kRollover, fresh(2), at(2)).accepted);
-        auto tilted = fresh(2);
-        tilted.imu.quaternion = {0.819152F, 0.573576F, 0.0F, 0.0F}; // roll = 70 deg
-        tilted.imu.six_axis_quaternion = tilted.imu.quaternion;
-        assert(c.set_mode(Mode::kRollover, tilted, at(2)).accepted);
-        assert(!c.prepare_policy(tilted, at(2.01)));
-        auto output = c.tick(tilted, at(2.01));
-        assert(output[0].mode == go2::MotorMode::kFoc);
-        const go2::Joints last_recorded_degrees{22.38F, 29.45F, -123.36F, -16.07F, 149.03F, -156.68F,
-            22.38F, 29.45F, -123.36F, -16.07F, 149.03F, -156.68F};
-        const double midpoint = 2 + (segments - .5) * .8;
-        output = c.tick(fresh(midpoint), at(midpoint));
-        for (std::size_t i = 0; i < go2::kNumJoints; ++i)
-            near(output[i].position_rad, .5F * (last_recorded_degrees[i] * 3.14159265358979323846F / 180.F +
-                config.crouch_pose[i]));
-        const double completion = 2 + segments * .8 + .01;
-        output = c.tick(fresh(completion), at(completion));
-        for (std::size_t i = 0; i < go2::kNumJoints; ++i)
-            near(output[i].position_rad, config.crouch_pose[i]);
+    if (std::filesystem::is_regular_file(std::filesystem::path(GO2_TEST_MODEL_DIR) / "go2_rollover.onnx")) {
+        for (const bool ready : {true, false}) {
+            const auto config = test_controller_config();
+            go2::Controller c(config);
+            assert(c.set_mode(Mode::kCrouch, fresh(.5, config.crouch_pose), at(.5)).accepted);
+            assert(!c.set_mode(Mode::kRollover, fresh(1), at(1)).accepted);
+            auto supine = fresh(1, config.crouch_pose);
+            supine.imu.quaternion = {0.F, 1.F, 0.F, 0.F};
+            assert(c.set_mode(Mode::kRollover, supine, at(1)).accepted);
+            assert(!c.step_rollover(supine, at(1)).accepted);
+            brake(c.tick(supine, at(1)));
+            const auto pose = ready ? config.crouch_pose : go2::kStandPose;
+            go2::Commands previous{};
+            const int finish_frame = ready ? 140 : 154;
+            for (int frame = 0; frame < finish_frame; ++frame) {
+                const double time = 1.0 + frame * .02;
+                const auto state = frame == 0 ? supine : fresh(time, pose);
+                const auto request = c.prepare_policy(state, at(time));
+                assert(request && request->observation.size() == 43U);
+                near(request->observation[42], float(frame) / 185.F);
+                c.complete_policy(*request, {}, at(time));
+                previous = c.tick(state, at(time));
+                assert(c.status().mode == Mode::kRollover);
+            }
+            const double time = 1.0 + finish_frame * .02;
+            const auto state = fresh(time, pose);
+            assert(!c.prepare_policy(state, at(time)));
+            const auto commands = c.tick(state, at(time));
+            if (ready) {
+                assert(c.status().mode == Mode::kCrouch && !c.status().protective_crouch);
+                near(commands[2].torque_nm, previous[2].torque_nm);
+                near(commands[2].kp, 0.F);
+                const auto hold = c.tick(fresh(time + 1.1, pose), at(time + 1.1));
+                assert(c.status().mode == Mode::kCrouch);
+                near(hold[2].position_rad, pose[2]);
+            } else {
+                assert(c.status().mode == Mode::kPassive);
+                brake(commands);
+            }
+        }
     }
     {
-        // Accept rollover directly from Pose A; it is not gated on a prior
-        // completed stand transition.
-        go2::Controller c(test_controller_config());
-        assert(c.set_mode(Mode::kCrouch, fresh(1), at(1)).accepted);
-        c.tick(fresh(3), at(3));
-        auto pitched = fresh(3);
-        pitched.imu.quaternion = {0.819152F, 0.0F, 0.573576F, 0.0F}; // pitch = 70 deg
-        pitched.imu.six_axis_quaternion = pitched.imu.quaternion;
-        assert(c.set_mode(Mode::kRollover, pitched, at(3)).accepted);
-    }
-    {
-        // Manual steps match automatic targets, but wait indefinitely between
-        // presses. After entry, becoming upright must not block later steps.
+        // Manual steps wait between presses, including after the robot becomes upright.
         auto config = test_controller_config();
-        go2::Controller manual(config), automatic(config);
+        go2::Controller manual(config);
         const int segments = manual.status().rollover_segments;
         assert(!manual.step_rollover(fresh(1), at(1)).accepted);
         auto tilted = fresh(1);
         tilted.imu.quaternion = {0.819152F, 0.573576F, 0.0F, 0.0F};
         tilted.imu.six_axis_quaternion = tilted.imu.quaternion;
-        assert(automatic.set_mode(Mode::kRollover, tilted, at(1)).accepted);
-        assert(!automatic.step_rollover(tilted, at(1)).accepted);
         for (std::size_t step = 0; step < static_cast<std::size_t>(segments); ++step) {
             const double start = 1 + step * 4.0;
             assert(manual.step_rollover(step == 0 ? tilted : fresh(start), at(start)).accepted);
@@ -689,17 +690,20 @@ int main() {
             assert(!manual.step_rollover(fresh(start + .1), at(start + .1)).accepted);
             assert(!manual.prepare_policy(fresh(start + .4), at(start + .4)));
             const auto midway = manual.tick(fresh(start + .4), at(start + .4));
-            const double reference_mid = 1 + step * .8 + .4;
-            const auto expected_mid = automatic.tick(fresh(reference_mid), at(reference_mid));
+            if (step + 1 == static_cast<std::size_t>(segments)) {
+                const go2::Joints last_degrees{22.38F, 29.45F, -123.36F, -16.07F, 149.03F, -156.68F,
+                    22.38F, 29.45F, -123.36F, -16.07F, 149.03F, -156.68F};
+                for (std::size_t joint = 0; joint < go2::kNumJoints; ++joint)
+                    near(midway[joint].position_rad,
+                        .5F * (last_degrees[joint] * 3.14159265358979323846F / 180.F + config.crouch_pose[joint]));
+            }
             const auto end = manual.tick(fresh(start + .81), at(start + .81));
             assert(!manual.status().rollover_step_running);
             const auto held = manual.tick(fresh(start + 3), at(start + 3));
-            const double reference_end = 1 + (step + 1) * .8;
-            const auto expected_end = automatic.tick(fresh(reference_end), at(reference_end));
             for (std::size_t joint = 0; joint < go2::kNumJoints; ++joint) {
-                near(midway[joint].position_rad, expected_mid[joint].position_rad);
-                near(end[joint].position_rad, expected_end[joint].position_rad);
                 near(held[joint].position_rad, end[joint].position_rad);
+                if (step + 1 == static_cast<std::size_t>(segments))
+                    near(end[joint].position_rad, config.crouch_pose[joint]);
             }
         }
         assert(!manual.step_rollover(fresh(40), at(40)).accepted);

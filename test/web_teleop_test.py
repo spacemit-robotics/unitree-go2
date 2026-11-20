@@ -310,6 +310,10 @@ class WifiStartupTests(unittest.TestCase):
                         self.assertEqual(state["ssid"], "NewHotspot")
                         self.assertEqual(manager.ssid, state["ssid"])
                         self.assertEqual(manager._restore_connection, "wifi-uuid")
+                        command_mock.assert_any_call(
+                            "ip", "-4", "route", "replace", "224.0.0.251/32",
+                            "dev", "wlan0", "src", "10.0.91.250",
+                        )
                         self.assertFalse(any(call.args[1:3] == ("connection", "add")
                                              for call in command_mock.call_args_list))
                         self.assertEqual(settings.AddConnection.call_count, 0 if existing else 1)
@@ -450,6 +454,14 @@ class WebHttpTests(unittest.TestCase):
             return response.status, json.loads(response.read())
         finally:
             connection.close()
+
+    def test_webrtc_network_failure_returns_json_and_allows_retry(self):
+        self.node.control = Mock()
+        answer = {"type": "answer", "sdp": "test-answer"}
+        self.node.control.answer.side_effect = [OSError(19, "No such device"), answer]
+        offer = {"type": "offer", "sdp": "test-offer"}
+        self.assertEqual(self.request("rtc/offer", offer), (503, {"error": "WebRTC network unavailable"}))
+        self.assertEqual(self.request("rtc/offer", offer), (200, answer))
 
     def test_camera_can_be_closed_when_motion_controller_is_offline(self):
         self.ready.return_value = False
