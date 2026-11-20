@@ -153,6 +153,11 @@ class RobotNetwork:
             primary = next(item for item in addresses["addr_info"] if item["scope"] == "global")
             self.address = primary["local"]
             self.subnet = ipaddress.IPv4Interface(f"{self.address}/{primary['prefixlen']}").network
+            if mode == "ap":
+                # aioice joins mDNS on the interface selected by the IPv4 route.
+                # NetworkManager shared profiles do not retain multicast routes.
+                command("ip", "-4", "route", "replace", "224.0.0.251/32",
+                        "dev", self.interface, "src", self.address)
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)

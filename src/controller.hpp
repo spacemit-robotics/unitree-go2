@@ -20,7 +20,7 @@ constexpr Joints kStandKp{60, 80, 80, 60, 80, 80, 60, 80, 80, 60, 80, 80};
 constexpr Joints kStandKd{5, 4, 4, 5, 4, 4, 5, 4, 4, 5, 4, 4};
 
 enum class Mode { kPassive, kCrouch, kStand, kWave, kTerrain,
-    kRollover, kForwardJump, kSit, kWalk };
+    kRollover, kForwardJump, kSit, kWalk, kDance };
 const char* mode_name(Mode);
 Mode parse_mode(const std::string&);
 bool mode_uses_policy(Mode);
@@ -110,6 +110,7 @@ class Controller final {
     std::optional<Commands> check_policy_health(const RobotState&, TimePoint);
     void check_walking_tilt(const RobotState&, TimePoint);
     void advance_recovery(const RobotState&, TimePoint);
+    bool learned_rollover_active() const;
     Commands mode_commands(const RobotState&, TimePoint);
 
     // Policy preparation keeps mode transitions before observation assembly.
@@ -142,7 +143,9 @@ class Controller final {
     // Finite motions and recovery stages.
     std::size_t rollover_step_{0};
     bool rollover_step_running_{false};
-    TimePoint rollover_step_at_{};
+    TimePoint rollover_step_at_{}, rollover_torque_at_{};
+    unsigned rollover_crouch_ready_frames_{0};
+    std::optional<Joints> rollover_crouch_entry_torque_;
     std::uint64_t policy_frame_{0};
     std::optional<float> sit_exit_start_;
     std::optional<TimePoint> sit_exit_stable_since_;

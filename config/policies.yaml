@@ -20,12 +20,182 @@ go2_modes:
     required: true
     motion: {path: ../resources/motions/go2_forward_jump.motion, frames: 86}
   sit: {models: [sit], required: true}
+  rollover: {models: [rollover]}
+  dance:
+    models: [dance]
+    motion: {path: ../resources/motions/go2_dance.motion, frames: 1001}
 
 rl_policy:
   type: onnx_infer
   rl_dt: 0.02
   onnx_infer:
     policies:
+      dance:
+        <<: *executor
+        model_path: go2_dance.onnx
+        action_joint_index:
+        - 3
+        - 4
+        - 5
+        - 0
+        - 1
+        - 2
+        - 9
+        - 10
+        - 11
+        - 6
+        - 7
+        - 8
+        rl_default_pos:
+        - 0.0
+        - 0.8999999761581421
+        - -1.7999999523162842
+        - 0.0
+        - 0.8999999761581421
+        - -1.7999999523162842
+        - 0.0
+        - 0.8999999761581421
+        - -1.7999999523162842
+        - 0.0
+        - 0.8999999761581421
+        - -1.7999999523162842
+        action_scale: 0.2
+        kp:
+        - 26
+        - 26
+        - 48
+        - 26
+        - 26
+        - 48
+        - 26
+        - 26
+        - 48
+        - 26
+        - 26
+        - 48
+        kd:
+        - 1.2
+        - 1.2
+        - 2.2
+        - 1.2
+        - 1.2
+        - 2.2
+        - 1.2
+        - 1.2
+        - 2.2
+        - 1.2
+        - 1.2
+        - 2.2
+        clip_actions: 3.0
+        command:
+          scale:
+          - 1
+          - 1
+          - 1
+        observation:
+          segment_0_terms:
+          - reference_position
+          - reference_velocity
+          - reference_orientation
+          - ang_vel
+          - dof_pos
+          - dof_vel
+          - last_action
+          ang_vel_scale: 1.0
+          dof_pos_scale: 1.0
+          dof_pos_subtract_default: true
+          dof_vel_scale: 1.0
+          strict_dim_check: true
+        model_io:
+          inputs:
+          - name: obs
+            source: observation
+          outputs:
+          - name: actions
+            target: action
+        custom_array_dims:
+          reference_position: 12
+          reference_velocity: 12
+          reference_orientation: 6
+        policy_adapter:
+          command_limits:
+          - 0
+          - 0
+          - 0
+          - 0
+          - 0
+          - 0
+          quaternion: six_axis
+          last_action_scale: 1.0
+          last_action_clip: 3.0
+          target_clip: 3.0
+          joint_lower:
+          - -1.01625588
+          - -1.51018493
+          - -2.69385065
+          - -1.01625588
+          - -1.51018493
+          - -2.69385065
+          - -1.01625588
+          - -0.46298494
+          - -2.69385065
+          - -1.01625588
+          - -0.46298494
+          - -2.69385065
+          joint_upper:
+          - 1.01625588
+          - 3.43008479
+          - -0.86660931
+          - 1.01625588
+          - 3.43008479
+          - -0.86660931
+          - 1.01625588
+          - 4.47728473
+          - -0.86660931
+          - 1.01625588
+          - 4.47728473
+          - -0.86660931
+          effort_limit:
+          - 23.5
+          - 23.5
+          - 45
+          - 23.5
+          - 23.5
+          - 45
+          - 23.5
+          - 23.5
+          - 45
+          - 23.5
+          - 23.5
+          - 45
+      rollover:
+        <<: *executor
+        model_path: go2_rollover.onnx
+        action_joint_index: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
+        rl_default_pos: [0, 0.8, -1.5, 0, 0.8, -1.5, 0, 0.8, -1.5, 0, 0.8, -1.5]
+        action_scale: 0.6
+        # Hardware gains validated with the rollout torque filter.
+        kp: [45, 60, 60, 45, 60, 60, 45, 60, 60, 45, 60, 60]
+        kd: [3.25, 2.6, 2.6, 3.25, 2.6, 2.6, 3.25, 2.6, 2.6, 3.25, 2.6, 2.6]
+        observation:
+          segment_0_terms: [gravity, ang_vel, dof_pos, dof_vel, last_action, recovery_phase]
+          ang_vel_scale: 0.25
+          dof_pos_subtract_default: true
+          dof_vel_scale: 0.05
+          strict_dim_check: true
+        custom_array_dims: {recovery_phase: 1}
+        clip_observations: 15.0
+        policy_adapter:
+          command_limits: [0, 0, 0, 0, 0, 0]
+          quaternion: board
+          last_action_clip: 3.0
+          target_clip: 3.0
+          joint_lower: [-1.0472, -1.5708, -2.7227, -1.0472, -1.5708, -2.7227,
+                        -1.0472, -0.5236, -2.7227, -1.0472, -0.5236, -2.7227]
+          joint_upper: [1.0472, 3.4907, -0.83776, 1.0472, 3.4907, -0.83776,
+                        1.0472, 4.5379, -0.83776, 1.0472, 4.5379, -0.83776]
+          effort_limit: [17.775, 17.775, 26.6625, 17.775, 17.775, 26.6625,
+                         17.775, 17.775, 26.6625, 17.775, 17.775, 26.6625]
       walk:
         action_joint_index: [3, 0, 9, 6, 4, 1, 10, 7, 5, 2, 11, 8]
         rl_default_pos: [-0.1, 0.8, -1.5, 0.1, 0.8, -1.5, -0.1, 1, -1.5, 0.1, 1, -1.5]
@@ -160,6 +330,31 @@ rl_policy:
 model_manifest:
   # Model paths are relative to policy/; resource paths are relative to the application root.
   models:
+    dance:
+      path: go2_dance.onnx
+      reference: resources/motions/go2_dance.motion
+      label: 舞蹈
+      contract: isaaclab_residual_mimic_obs69_action12_leg_major_50hz
+      reference_frames: 1001
+      episode_frames: 1100
+      source_commit: b25c0dec9fbdb406061eb41b2f6e62afabfd63ed
+      provenance:
+        kind: self_trained
+        training_project: self_train/2.motions/2.reference_tracking/6.go2_dance
+        checkpoint: model_9999.pt
+      sha256: 2a1cd96a716debe7a48b0489aa06f077b0b5847206365cd03a183cb4f418a3d2
+      reference_sha256: 77dea7e2f199929b5c0ea8abe99e3a77897ec6b9dec6ba4b97ba70a790fca916
+    rollover:
+      path: go2_rollover.onnx
+      label: 倒地自起
+      contract: go2_rollover_v6_obs43_action12_50hz
+      source_commit: 630ed25e1b89d5b1baf0c106a5da663247059e94
+      training_variant: home_v6_stance_4096_20261119
+      provenance:
+        kind: self_trained
+        training_project: self_train/2.motions/2.reference_tracking/7.go2_rollover_v6
+        checkpoint: model_199.pt
+      sha256: e6178146e41a91fb3df6811f8ec4b88a8a1943786fba4e605ef2950c25703d66
     walk:
       remote_slot: 9
       path: go2_blind_rough.onnx
@@ -241,6 +436,14 @@ model_manifest:
   archive:
     base_url: https://archive.spacemit.com/spacemit-ai/model_zoo/rl/unitree-go2/
   files:
+    go2_dance.onnx:
+      bytes: 474669
+      sha256: 2a1cd96a716debe7a48b0489aa06f077b0b5847206365cd03a183cb4f418a3d2
+      training_path: self_train/2.motions/2.reference_tracking/6.go2_dance/models/go2_dance/robust_v1/robust_v1_20261116_r2/policy.onnx
+    go2_rollover.onnx:
+      bytes: 188944
+      sha256: e6178146e41a91fb3df6811f8ec4b88a8a1943786fba4e605ef2950c25703d66
+      training_path: self_train/2.motions/2.reference_tracking/7.go2_rollover_v6/models/go2_rollover/v6/home_v6_stance_4096_20261119/policy.onnx
     go2_blind_rough.onnx:
       bytes: 758549
       sha256: f2fd66b495471dd3c4fa292bfb9d5feed47ac2d9b092494471bf95535d93dfac

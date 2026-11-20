@@ -46,10 +46,12 @@ Joints positions(const RobotState &state) {
         result[i] = state.motors.joints[i].feedback.position_rad;
     return result;
 }
-Joints interpolate(const Joints &from, const Joints &to, double elapsed, double duration) {
-    // Same single-precision smoothstep as the original stand/crouch implementation.
+float smoothstep(double elapsed, double duration) {
     const float t = std::clamp(static_cast<float>(elapsed) / static_cast<float>(duration), 0.F, 1.F);
-    const float a = t * t * (3.F - 2.F * t);
+    return t * t * (3.F - 2.F * t);
+}
+Joints interpolate(const Joints &from, const Joints &to, double elapsed, double duration) {
+    const float a = smoothstep(elapsed, duration);
     Joints result{};
     for (std::size_t i = 0; i < result.size(); ++i)
         result[i] = from[i] * (1.F - a) + to[i] * a;
@@ -103,12 +105,16 @@ float slew(float current, float target, double acceleration_delta, double decele
     return current + std::clamp(delta, -limit, limit);
 }
 
-// The v9 "翻身" action is a deterministic, low-level pose sequence rather
-// than an ONNX policy. Each 0.8 s segment blends between recorded poses,
-// starting with Pose A and ending at the configured mechanical Pose A.
+// The manual rollover diagnostic blends recorded poses in 0.8 s segments.
 constexpr float kRolloverPi = 3.14159265358979323846F;
 constexpr float kRolloverTiltThreshold = 60.0F * kRolloverPi / 180.0F;
 constexpr double kRolloverSegmentDuration = 0.8;
+// Keep the actor through foot placement and finish before its stand-up phase.
+constexpr std::uint64_t kRolloverCrouchFirstFrame = 137;
+constexpr std::uint64_t kRolloverCrouchDeadlineFrame = 154;
+constexpr unsigned kRolloverCrouchReadyFrames = 4;
+constexpr double kRolloverTorqueRampSeconds = .16;
+constexpr double kRolloverTorqueFilterSeconds = .010;
 // Six uses poses 1-4, eight uses poses 1-6, and nine uses poses 1-7.
 // Eight omits the original segment 8 and returns directly from pose 6 to Pose A.
 constexpr std::size_t kRolloverSegmentCount = 9;
@@ -123,8 +129,28 @@ bool tilt_exceeds(const ImuSample &imu, float roll_threshold, float pitch_thresh
     const float pitch = std::asin(std::clamp(2.0F * (q[0] * q[2] - q[3] * q[1]) / norm, -1.0F, 1.0F));
     return std::fabs(roll) > roll_threshold || std::fabs(pitch) > pitch_threshold;
 }
+// Negative when upright and positive when lying on the back.
+float rollover_gravity_z(const ImuSample &imu) {
+    const auto &q = imu.quaternion;
+    const float norm = q[0] * q[0] + q[1] * q[1] + q[2] * q[2] + q[3] * q[3];
+    return 2.F * (q[1] * q[1] + q[2] * q[2]) / norm - 1.F;
+}
 bool rollover_tilted(const ImuSample &imu) {
     return tilt_exceeds(imu, kRolloverTiltThreshold, kRolloverTiltThreshold);
+}
+bool rollover_crouch_ready(const RobotState &state, const Joints &crouch_pose) {
+    const auto &gyro = state.imu.angular_velocity;
+    const float speed_squared = gyro[0] * gyro[0] + gyro[1] * gyro[1] + gyro[2] * gyro[2];
+    if (rollover_gravity_z(state.imu) >= -.95F || speed_squared >= .9F * .9F)
+        return false;
+    constexpr std::array<float, kMotorsPerLeg> kCrouchTolerance{.65F, 1.25F, .40F};
+    for (std::size_t i = 0; i < kNumJoints; ++i) {
+        const auto &feedback = state.motors.joints[i].feedback;
+        if (std::fabs(feedback.position_rad - crouch_pose[i]) >= kCrouchTolerance[i % kMotorsPerLeg] ||
+            std::fabs(feedback.velocity_rad_s) >= 4.F)
+            return false;
+    }
+    return true;
 }
 constexpr std::array<std::array<float, kNumJoints>, 7> kRolloverRecordedPoses{{
     {rollover_rad(-12.41F), rollover_rad(180.69F), rollover_rad(-157.62F), rollover_rad(48.39F), rollover_rad(92.19F),
@@ -174,6 +200,7 @@ bool requires_fixstand(Mode mode) {
     case Mode::kWalk:
     case Mode::kWave:
     case Mode::kForwardJump:
+    case Mode::kDance:
     case Mode::kSit:
     case Mode::kTerrain:
         return true;
@@ -185,6 +212,7 @@ bool requires_fixstand(Mode mode) {
 Joints action_entry_target(const PolicyAdapter &adapter, Mode mode, const std::vector<Joints> &trajectory) {
     switch (mode) {
     case Mode::kForwardJump:
+    case Mode::kDance:
     case Mode::kWave:
         return adapter.action_to_hardware_targets({}, mode);
     case Mode::kSit:
@@ -212,6 +240,8 @@ const char *mode_name(Mode mode) {
         return "terrain";
     case Mode::kForwardJump:
         return "forward_jump";
+    case Mode::kDance:
+        return "dance";
     case Mode::kSit:
         return "sit";
     case Mode::kRollover:
@@ -234,6 +264,8 @@ Mode parse_mode(const std::string &value) {
         return Mode::kTerrain;
     if (value == "forward_jump")
         return Mode::kForwardJump;
+    if (value == "dance")
+        return Mode::kDance;
     if (value == "sit")
         return Mode::kSit;
     if (value == "rollover")
@@ -400,6 +432,7 @@ void Controller::invalidate_policy() {
     target_valid_ = false;
     target_variant_ = 0;
     inference_fault_.clear();
+    rollover_crouch_ready_frames_ = 0;
 }
 void Controller::reset_skill_progress() {
     sit_exit_start_.reset();
@@ -409,6 +442,8 @@ void Controller::reset_skill_progress() {
     policy_frame_ = 0U;
     rollover_step_ = 0;
     rollover_step_running_ = false;
+    rollover_torque_at_ = {};
+    rollover_crouch_entry_torque_.reset();
 }
 
 void Controller::passive(const std::string &reason) {
@@ -472,7 +507,7 @@ void Controller::enter(Mode mode, const RobotState &s, TimePoint now) {
     cts_history_initialized_ = false;
 
     reset_skill_progress();
-    if (mode == Mode::kSit || mode == Mode::kForwardJump || mode == Mode::kWave) {
+    if (mode == Mode::kSit || mode == Mode::kForwardJump || mode == Mode::kWave || mode == Mode::kDance) {
         target_ = config_.policy_adapter->action_to_hardware_targets({}, mode, 0.F, config_.sit_reference);
         target_valid_ = true;
     }
@@ -547,9 +582,12 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
             return {true, "already passive"};
         if (protective_)
             return {true, "crouch already in progress; BRAKE follows"};
+        if (learned_rollover_active() && !finish_motion) {
+            passive("rollover cancelled; BRAKE");
+            return {true, reason_};
+        }
         const bool has_exit = mode_ == Mode::kWave || mode_ == Mode::kSit ||
-            mode_ == Mode::kForwardJump ||
-            mode_ == Mode::kRollover;
+            mode_ == Mode::kForwardJump || mode_ == Mode::kDance || mode_ == Mode::kRollover;
         if (finish_motion && health == Health::kFresh && imu_fresh(s.imu, now) && !imu_latched_ &&
             (has_exit || passive_after_exit_)) {
             if (passive_after_exit_)
@@ -587,8 +625,11 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
         return {false, "fresh body IMU required"};
     if (imu_latched_)
         return {false, "wait for safety loop to acknowledge IMU recovery"};
-    if (next == Mode::kRollover && !rollover_tilted(s.imu)) {
-        return {false, "rollover requires |roll| > 60 deg or |pitch| > 60 deg"};
+    if (next == Mode::kRollover) {
+        if (mode_ != Mode::kPassive && mode_ != Mode::kCrouch)
+            return {false, "learned rollover requires passive or crouch"};
+        if (rollover_gravity_z(s.imu) <= .5F)
+            return {false, "learned rollover requires the robot to be lying on its back"};
     }
     if (!requesting_passive)
         passive_after_exit_ = false;
@@ -609,7 +650,7 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
         reason_ = "sit recovery before " + std::string(mode_name(next));
         return {true, reason_};
     }
-    if (mode_ == Mode::kForwardJump && next != mode_) {
+    if ((mode_ == Mode::kForwardJump || mode_ == Mode::kDance) && next != mode_) {
         pending_mode_ = next;
         reason_ = "finishing motion before " + std::string(mode_name(next));
         return {true, reason_};
@@ -626,14 +667,15 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
 
     if (requires_fixstand(next)) {
         const bool fixstand_ready = next != Mode::kWave && next != Mode::kSit && next != Mode::kForwardJump &&
-            mode_ == Mode::kStand && seconds(now - transition_at_) >= config_.stand_duration &&
+            next != Mode::kDance && mode_ == Mode::kStand && seconds(now - transition_at_) >= config_.stand_duration &&
             last_valid_;
         if (!fixstand_ready) {
             // Queue the requested policy while ensuring the robot first reaches the
             // fixed standing pose. Reference motions need their own entry pose;
             // other policies reuse an ongoing FixStand.
             pending_mode_ = next;
-            if (mode_ != Mode::kStand || next == Mode::kWave || next == Mode::kSit || next == Mode::kForwardJump)
+            if (mode_ != Mode::kStand || next == Mode::kWave || next == Mode::kSit || next == Mode::kForwardJump ||
+                next == Mode::kDance)
                 enter(Mode::kStand, s, now);
             reason_ = "FixStand before " + std::string(mode_name(next));
             return {
@@ -692,8 +734,7 @@ Commands Controller::tick(const RobotState &s, TimePoint now) {
     advance_recovery(s, now);
     if (passive_after_exit_ && !protective_ &&
         ((mode_ == Mode::kStand && !pending_mode_) ||
-            (mode_ == Mode::kRollover && (rollover_step_ > 0 ||
-                seconds(now - transition_at_) >= kRolloverSegmentCount * kRolloverSegmentDuration)))) {
+            (mode_ == Mode::kRollover && rollover_step_ > 0))) {
         crouch(s, now, "user requested passive");
     }
     return mode_commands(s, now);
@@ -817,11 +858,21 @@ std::optional<Commands> Controller::check_policy_health(const RobotState &s, Tim
             reason_ = "body IMU hard timeout; holding flip command";
             return last_valid_ ? last_ : Commands{};
         }
+        if (learned_rollover_active()) {
+            passive("rollover IMU timeout; BRAKE");
+            return remember({});
+        }
         crouch(s, now, "body IMU hard timeout");
     }
 
-    if (!protective_ && mode_ != Mode::kPassive && mode_ != Mode::kCrouch && mode_ != Mode::kStand &&
-        mode_ != Mode::kRollover) {
+    if (!protective_ && learned_rollover_active()) {
+        if (!inference_fault_.empty() || seconds(now - policy_at_) > config_.motor_hard_timeout) {
+            passive(inference_fault_.empty() ? "rollover inference timeout; BRAKE"
+                                            : "rollover inference fault; BRAKE: " + inference_fault_);
+            return remember({});
+        }
+    }
+    if (!protective_ && mode_uses_policy(mode_)) {
         if (!inference_fault_.empty()) {
             if (aerial_flip(mode_)) {
                 reason_ = "flip inference fault; holding last command: " + inference_fault_;
@@ -880,6 +931,10 @@ void Controller::advance_recovery(const RobotState &s, TimePoint now) {
 
 }
 
+bool Controller::learned_rollover_active() const {
+    return mode_ == Mode::kRollover && rollover_step_ == 0;
+}
+
 Commands Controller::mode_commands(const RobotState &s, TimePoint now) {
     if (protective_) {
         double elapsed = seconds(now - transition_at_);
@@ -909,26 +964,35 @@ Commands Controller::mode_commands(const RobotState &s, TimePoint now) {
     if (mode_ == Mode::kStand || mode_ == Mode::kCrouch) {
         const Joints pose = mode_ == Mode::kStand &&
                 (pending_mode_ == Mode::kWave || pending_mode_ == Mode::kSit ||
-                    pending_mode_ == Mode::kForwardJump)
+                    pending_mode_ == Mode::kForwardJump || pending_mode_ == Mode::kDance)
             ? action_entry_target(*config_.policy_adapter, *pending_mode_, config_.sit_reference)
             : (mode_ == Mode::kStand ? kStandPose : config_.crouch_pose);
-        return remember(pose_commands(*config_.policy_adapter,
-            interpolate(initial_, pose, seconds(now - transition_at_),
-                mode_ == Mode::kStand ? config_.stand_duration : config_.crouch_pose_duration),
-            false));
-    }
-    if (mode_ == Mode::kRollover) {
-        // Keep the action in the active mode until its final Pose A segment has
-        // completed; the next web command (stand/passive/terrain) can then take over.
-        double elapsed = seconds(now - transition_at_);
-        if (rollover_step_ > 0) {
-            const double step_elapsed = std::clamp(seconds(now - rollover_step_at_), 0.0, kRolloverSegmentDuration);
-            elapsed = (rollover_step_ - 1) * kRolloverSegmentDuration + step_elapsed;
-            if (rollover_step_running_ && step_elapsed >= kRolloverSegmentDuration) {
-                rollover_step_running_ = false;
-                reason_ = "rollover step " + std::to_string(rollover_step_) + "/" +
-                    std::to_string(kRolloverSegmentCount) + " holding";
+        const double elapsed = seconds(now - transition_at_);
+        auto commands = pose_commands(*config_.policy_adapter,
+            interpolate(initial_, pose, elapsed,
+                mode_ == Mode::kStand ? config_.stand_duration : config_.crouch_pose_duration), false);
+        if (rollover_crouch_entry_torque_) {
+            const double blend_elapsed = seconds(now - rollover_torque_at_);
+            if (blend_elapsed >= kRolloverTorqueRampSeconds) {
+                rollover_crouch_entry_torque_.reset();
+            } else {
+                const float blend = smoothstep(blend_elapsed, kRolloverTorqueRampSeconds);
+                for (std::size_t i = 0; i < commands.size(); ++i) {
+                    commands[i].kp *= blend;
+                    commands[i].kd *= blend;
+                    commands[i].torque_nm = (1.F - blend) * (*rollover_crouch_entry_torque_)[i];
+                }
             }
+        }
+        return remember(commands);
+    }
+    if (mode_ == Mode::kRollover && rollover_step_ > 0) {
+        const double step_elapsed = std::clamp(seconds(now - rollover_step_at_), 0.0, kRolloverSegmentDuration);
+        const double elapsed = (rollover_step_ - 1) * kRolloverSegmentDuration + step_elapsed;
+        if (rollover_step_running_ && step_elapsed >= kRolloverSegmentDuration) {
+            rollover_step_running_ = false;
+            reason_ = "rollover step " + std::to_string(rollover_step_) + "/" +
+                std::to_string(kRolloverSegmentCount) + " holding";
         }
         return remember(pose_commands(*config_.policy_adapter,
             rollover_target(initial_, config_.crouch_pose, elapsed), false));
@@ -936,6 +1000,27 @@ Commands Controller::mode_commands(const RobotState &s, TimePoint now) {
     if (mode_ != Mode::kPassive && mode_ != Mode::kCrouch && mode_ != Mode::kStand && target_valid_) {
         Joints commanded = target_;
 
+        if (mode_ == Mode::kDance || learned_rollover_active()) {
+            auto torques = config_.policy_adapter->policy_torques(commanded, s, mode_);
+            if (learned_rollover_active()) {
+                // Limit the initial torque and smooth the commands sent every control tick.
+                const auto previous_at = rollover_torque_at_ == TimePoint{} ? transition_at_ : rollover_torque_at_;
+                const double dt = std::clamp(seconds(now - previous_at), 0.0, .005);
+                rollover_torque_at_ = now;
+                const auto mix = static_cast<float>(-std::expm1(-dt / kRolloverTorqueFilterSeconds));
+                const float ramp = smoothstep(seconds(now - transition_at_), kRolloverTorqueRampSeconds);
+                for (std::size_t i = 0; i < kNumJoints; ++i) {
+                    const float previous = last_[i].torque_nm;
+                    torques[i] = previous + mix * (ramp * torques[i] - previous);
+                }
+            }
+            Commands commands{};
+            for (std::size_t i = 0; i < kNumJoints; ++i) {
+                commands[i].mode = MotorMode::kFoc;
+                commands[i].torque_nm = torques[i];
+            }
+            return remember(commands);
+        }
         if (mode_ == Mode::kWave || mode_ == Mode::kSit) {
             Commands commands{};
             if (config_.smallcore_pd) {
@@ -968,13 +1053,15 @@ Commands Controller::mode_commands(const RobotState &s, TimePoint now) {
         }
         return remember(commands);
     }
+    if (learned_rollover_active())
+        return remember({});
     return last_valid_ ? last_ : Commands{};
 }
 
 std::optional<PolicyRequest> Controller::prepare_policy(const RobotState &s, TimePoint now) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string reason;
-    if (mode_ == Mode::kPassive || mode_ == Mode::kCrouch || mode_ == Mode::kStand || mode_ == Mode::kRollover ||
+    if ((!mode_uses_policy(mode_) && !learned_rollover_active()) ||
         protective_ || !imu_fresh(s.imu, now) || motor_health(s, now, reason) != Health::kFresh)
         return std::nullopt;
     check_walking_tilt(s, now);
@@ -1000,7 +1087,30 @@ VelocityCommand Controller::policy_command(TimePoint now) {
 }
 
 bool Controller::policy_phase_ready(const RobotState &s, TimePoint now) {
-    if (mode_ == Mode::kForwardJump && policy_frame_ >= kForwardJumpFrames) {
+    if (learned_rollover_active() && policy_frame_ >= kRolloverCrouchFirstFrame) {
+        rollover_crouch_ready_frames_ =
+            rollover_crouch_ready(s, config_.crouch_pose) ? rollover_crouch_ready_frames_ + 1 : 0;
+        if (rollover_crouch_ready_frames_ >= kRolloverCrouchReadyFrames) {
+            if (passive_after_exit_) {
+                crouch(s, now, "user requested passive");
+            } else {
+                Joints entry_torque{};
+                for (std::size_t i = 0; i < kNumJoints; ++i)
+                    entry_torque[i] = last_[i].torque_nm;
+                enter(Mode::kCrouch, s, now);
+                rollover_crouch_entry_torque_ = entry_torque;
+                rollover_torque_at_ = now;
+                reason_ = "rollover complete; crouch";
+            }
+            return false;
+        }
+        if (policy_frame_ >= kRolloverCrouchDeadlineFrame) {
+            passive("rollover did not reach a stable crouch entry; BRAKE");
+            return false;
+        }
+    }
+    if ((mode_ == Mode::kForwardJump && policy_frame_ >= kForwardJumpFrames) ||
+        (mode_ == Mode::kDance && policy_frame_ >= kDanceFrames)) {
         finish_skill(s, now);
         return false;
     }
@@ -1013,7 +1123,7 @@ PolicyRequest Controller::prepare_mode_observation(const RobotState &s, Velocity
     auto observation = mode_ == Mode::kSit
         ? config_.policy_adapter->build_sit_observation(config_.sit_reference, s, previous_,
             (policy_frame_ + 1U) * kSkillControlDt, sit_exit_start_.value_or(std::numeric_limits<float>::infinity()))
-        : config_.policy_adapter->build_observation(s, command, previous_, mode_, reference_time);
+        : config_.policy_adapter->build_observation(s, command, previous_, mode_, reference_time, {}, policy_frame_);
     if (mode_ == Mode::kTerrain) {
         update_history<5>(cts_history_, cts_history_initialized_, observation, HistoryOrder::kOldestFirst);
         const auto dims = config_.policy_adapter->observation_term_dimensions(mode_);
@@ -1031,7 +1141,8 @@ PolicyRequest Controller::prepare_mode_observation(const RobotState &s, Velocity
     }
     const auto request_frame = policy_frame_;
     // Finite/reference motions advance only when an action is accepted.
-    if (mode_ != Mode::kWave && mode_ != Mode::kSit && mode_ != Mode::kForwardJump) {
+    if (mode_ != Mode::kWave && mode_ != Mode::kSit && mode_ != Mode::kForwardJump &&
+        mode_ != Mode::kRollover && mode_ != Mode::kDance) {
         ++policy_frame_;
     }
     return PolicyRequest{mode_, std::move(observation), s, request_frame, generation_, now};
@@ -1057,7 +1168,8 @@ void Controller::complete_policy(const PolicyRequest &request, const Action &act
                 value = std::clamp(value, -clip, clip);
         }
         const float reference_time = request.mode == Mode::kWave
-            ? next_wave_tick(wave_tick_, wave_raised_) * kSkillControlDt : 0.F;
+            ? next_wave_tick(wave_tick_, wave_raised_) * kSkillControlDt
+            : request.mode == Mode::kDance ? request.policy_frame * kSkillControlDt : 0.F;
         const auto target = request.mode == Mode::kSit
             ? config_.policy_adapter->sit_hardware_targets(config_.sit_reference, accepted_action,
                 (request.policy_frame + 1U) * kSkillControlDt,
@@ -1073,7 +1185,8 @@ void Controller::complete_policy(const PolicyRequest &request, const Action &act
 
         if (request.mode == Mode::kWave)
             wave_tick_ = next_wave_tick(wave_tick_, wave_raised_);
-        if (request.mode == Mode::kWave || request.mode == Mode::kSit || request.mode == Mode::kForwardJump) {
+        if (request.mode == Mode::kWave || request.mode == Mode::kSit || request.mode == Mode::kForwardJump ||
+            request.mode == Mode::kRollover || request.mode == Mode::kDance) {
             policy_frame_ = std::max(policy_frame_, request.policy_frame + 1U);
         }
     } catch (const std::exception &error) {
