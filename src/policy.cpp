@@ -71,7 +71,10 @@ Policy::Policy(
             throw std::invalid_argument("invalid model variant count: " + entry.first.as<std::string>());
         try {
             models_.emplace(mode, &adapter_->executor(mode));
-            if (const auto motion = entry.second["motion"]) {
+            if (mode == Mode::kDance) {
+                initial_reference_quaternions_[mode] = adapter_->dance_reference(0).quaternion;
+                yaw_alignments_[mode] = {1, 0, 0, 0};
+            } else if (const auto motion = entry.second["motion"]) {
                 auto reference = load_motion_reference(
                     (std::filesystem::path(yaml_path).parent_path() / motion["path"].as<std::string>()).string(),
                     motion["frames"].as<unsigned>());
@@ -109,20 +112,21 @@ Action Policy::infer(Mode mode, const std::vector<float>& input_observation,
     if (input_observation.size() != static_cast<std::size_t>(model.ObsDim()))
         throw std::invalid_argument("policy observation dimension mismatch");
     std::vector<float> observation = input_observation;
-    if (mode == Mode::kForwardJump) {
+    if (mode == Mode::kForwardJump || mode == Mode::kDance) {
         if (state == nullptr) throw std::invalid_argument("motion policy requires robot state");
-        const auto& reference = motion_references_.at(mode);
+        const bool dance = mode == Mode::kDance;
+        const auto last_frame = dance ? kDanceReferenceFrames - 1 : motion_references_.at(mode).size() - 1;
         const auto frame = policy_frame == std::numeric_limits<std::uint64_t>::max() ? steps_[mode]++ : policy_frame;
         if (frame == 0U)
             yaw_alignments_[mode] =
                 motion_yaw_alignment(state->imu.six_axis_quaternion, initial_reference_quaternions_.at(mode));
-        const auto index = std::min<std::size_t>(frame, reference.size() - 1);
-        const auto& ref = reference[index];
+        const auto& ref = dance ? adapter_->dance_reference(frame)
+            : motion_references_.at(mode)[std::min<std::uint64_t>(frame, last_frame)];
         Action previous{};
         std::copy_n(
             input_observation.begin() + adapter_->observation_term_offset(mode, "last_action"), 12, previous.begin());
         observation = adapter_->build_motion_observation(mode, *state, ref.position,
-            index + 1 == reference.size() ? Joints{} : ref.velocity, ref.quaternion, previous,
+            frame >= last_frame ? Joints{} : ref.velocity, ref.quaternion, previous,
             yaw_alignments_.at(mode));
     }
 
@@ -135,7 +139,7 @@ Action Policy::infer(Mode mode, const std::vector<float>& input_observation,
 void Policy::reset_mode(Mode mode, const RobotState* state) {
     std::lock_guard<std::mutex> lock(mutex_);
     steps_[mode] = 0U;
-    if (mode != Mode::kForwardJump) return;
+    if (mode != Mode::kForwardJump && mode != Mode::kDance) return;
 
     const Quaternion actual = state == nullptr ? Quaternion{1, 0, 0, 0} : normalize(state->imu.six_axis_quaternion);
     yaw_alignments_[mode] = motion_yaw_alignment(actual, initial_reference_quaternions_.at(mode));

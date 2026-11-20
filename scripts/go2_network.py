@@ -74,6 +74,7 @@ class RobotNetwork:
         self._wifi_connected = True
         self._wifi_refresh_at = 0.0
         self._restore_connection = ""
+        self._ap_mdns_route: tuple[str, ...] = ()
         self._guard = open("/run/go2-web-network.lock", "a", encoding="utf-8")
         try:
             fcntl.flock(self._guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -153,6 +154,12 @@ class RobotNetwork:
             primary = next(item for item in addresses["addr_info"] if item["scope"] == "global")
             self.address = primary["local"]
             self.subnet = ipaddress.IPv4Interface(f"{self.address}/{primary['prefixlen']}").network
+            if mode == "ap":
+                # aioice joins mDNS on the interface selected by the IPv4 route.
+                # NetworkManager shared profiles do not retain multicast routes.
+                route = ("224.0.0.251/32", "dev", self.interface, "src", self.address)
+                command("ip", "-4", "route", "replace", *route)
+                self._ap_mdns_route = route
             self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             self._socket.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
@@ -370,6 +377,12 @@ class RobotNetwork:
             self._socket.close()
         if self._bus is not None:
             self._bus.close()
+        if self._ap_mdns_route:
+            try:
+                command("ip", "-4", "route", "del", *self._ap_mdns_route)
+            except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                self.logger.warning(f"Cannot remove AP mDNS route: {exc}")
+            self._ap_mdns_route = ()
         if self._restore_connection:
             try:
                 command("nmcli", "connection", "up", "uuid", self._restore_connection)

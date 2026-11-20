@@ -41,6 +41,7 @@ MODES = {
     "crouch": "crouch",
     "sit": "sit",
     "forward_jump": "forward_jump",
+    "dance": "dance",
     "stand": "stand",
     "walk": "walk",
     "wave": "wave",
@@ -763,7 +764,13 @@ class Go2WebNode(Node):
                         return
                     payload = self.body()
                     if path == "/api/rtc/offer":
-                        self.send_json(200, node.control.answer(payload))
+                        try:
+                            answer = node.control.answer(payload)
+                        except OSError as exc:
+                            node.get_logger().warning(f"WebRTC negotiation failed: {exc}")
+                            self.send_json(503, {"error": "WebRTC network unavailable"})
+                            return
+                        self.send_json(200, answer)
                         return
                     if path == "/api/mode":
                         if not isinstance(payload, dict) or not isinstance(payload.get("mode"), str):

@@ -275,8 +275,8 @@ class WifiStartupTests(unittest.TestCase):
     def test_ap_name_updates_new_and_existing_profiles(self):
         network_type = network_module["RobotNetwork"]
         globals_ = network_type.__init__.__globals__
-        for existing in (False, True):
-            with self.subTest(existing=existing):
+        for existing, socket_failure in ((False, False), (True, False), (True, True)):
+            with self.subTest(existing=existing, socket_failure=socket_failure):
                 state = {"ssid": "OldHotspot"}
 
                 def command(*args):
@@ -298,18 +298,31 @@ class WifiStartupTests(unittest.TestCase):
 
                 command_mock = Mock(side_effect=command)
                 settings = Mock()
+                route = ("224.0.0.251/32", "dev", "wlan0", "src", "10.0.91.250")
+                cleanup = [
+                    unittest.mock.call("ip", "-4", "route", "del", *route),
+                    unittest.mock.call("nmcli", "connection", "up", "uuid", "wifi-uuid"),
+                ]
                 with patch.dict(globals_, {"command": command_mock, "open": Mock(return_value=Mock())}), \
                         patch.object(globals_["fcntl"], "flock"), \
-                        patch.object(globals_["socket"], "socket"), \
+                        patch.object(globals_["socket"], "socket",
+                                     side_effect=OSError("socket failed") if socket_failure else None), \
                         patch.object(globals_["dbus"], "Interface", return_value=settings), \
                         patch.object(globals_["dbus"], "Dictionary", side_effect=lambda value, **_: value), \
                         patch.object(globals_["dbus"], "ByteArray", side_effect=bytes):
+                    if socket_failure:
+                        with self.assertRaisesRegex(OSError, "socket failed"):
+                            network_type("robot-a", "ap", 8082, "10.0.91.250/23", "", "go2control",
+                                         lambda: True, Mock(), ap_ssid="NewHotspot")
+                        self.assertEqual(command_mock.call_args_list[-2:], cleanup)
+                        continue
                     manager = network_type("robot-a", "ap", 8082, "10.0.91.250/23", "", "go2control",
                                            lambda: True, Mock(), ap_ssid="NewHotspot")
                     try:
                         self.assertEqual(state["ssid"], "NewHotspot")
                         self.assertEqual(manager.ssid, state["ssid"])
                         self.assertEqual(manager._restore_connection, "wifi-uuid")
+                        command_mock.assert_any_call("ip", "-4", "route", "replace", *route)
                         self.assertFalse(any(call.args[1:3] == ("connection", "add")
                                              for call in command_mock.call_args_list))
                         self.assertEqual(settings.AddConnection.call_count, 0 if existing else 1)
@@ -321,6 +334,7 @@ class WifiStartupTests(unittest.TestCase):
                             self.assertEqual(profile["ipv4"]["method"], "shared")
                     finally:
                         manager.close()
+                    self.assertEqual(command_mock.call_args_list[-2:], cleanup)
 
     def test_sdk_discovery_rejects_legacy_and_unrelated_peers(self):
         with patch.dict("sys.modules", {"dbus": Mock()}):
@@ -415,6 +429,8 @@ class WifiStartupTests(unittest.TestCase):
                             ), command_mock.call_args_list)
                     finally:
                         network.close()
+                    self.assertFalse(any(call.args[:3] == ("ip", "-4", "route")
+                                         for call in command_mock.call_args_list))
 
 
 class WebHttpTests(unittest.TestCase):
@@ -450,6 +466,14 @@ class WebHttpTests(unittest.TestCase):
             return response.status, json.loads(response.read())
         finally:
             connection.close()
+
+    def test_webrtc_network_failure_returns_json_and_allows_retry(self):
+        self.node.control = Mock()
+        answer = {"type": "answer", "sdp": "test-answer"}
+        self.node.control.answer.side_effect = [OSError(19, "No such device"), answer]
+        offer = {"type": "offer", "sdp": "test-offer"}
+        self.assertEqual(self.request("rtc/offer", offer), (503, {"error": "WebRTC network unavailable"}))
+        self.assertEqual(self.request("rtc/offer", offer), (200, answer))
 
     def test_camera_can_be_closed_when_motion_controller_is_offline(self):
         self.ready.return_value = False
