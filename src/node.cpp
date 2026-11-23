@@ -28,6 +28,8 @@ const char* mode_display(Mode mode) {
             return "坐下";
         case Mode::kForwardJump:
             return "前跳";
+        case Mode::kDance:
+            return "舞蹈";
         case Mode::kStand:
             return "站立";
         case Mode::kWalk:
@@ -260,6 +262,10 @@ Node::Node() : rclcpp::Node("go2") {
             motion_log_path.c_str());
     }
     policy_ = std::make_unique<Policy>(model_path, policy_config, c.policy_adapter);
+    if (policy_->has_model(Mode::kRollover))
+        RCLCPP_INFO(get_logger(), "已加载倒地自起 ONNX 策略");
+    if (policy_->has_model(Mode::kDance))
+        RCLCPP_INFO(get_logger(), "已加载舞蹈 ONNX 策略");
     control_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     policy_group_ = create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive);
     rclcpp::SubscriptionOptions subscription_options;
@@ -358,9 +364,13 @@ Node::Node() : rclcpp::Node("go2") {
                 const bool rollover_step = request->mode == "rollover_step";
                 const auto requested_mode = rollover_step ? Mode::kRollover :
                     parse_mode(request->mode == "passive_direct" ? "passive" : request->mode);
-                if (!policy_->load_error(requested_mode).empty())
+                if (!rollover_step && !policy_->load_error(requested_mode).empty())
                     throw std::runtime_error(
                         std::string(mode_name(requested_mode)) + "策略不可用：" + policy_->load_error(requested_mode));
+                if (!rollover_step && requested_mode == Mode::kRollover && !policy_->has_model(requested_mode))
+                    throw std::runtime_error("缺少倒地自起模型");
+                if (requested_mode == Mode::kDance && !policy_->has_model(requested_mode))
+                    throw std::runtime_error("缺少舞蹈模型");
                 const auto previous_mode = controller_->status().mode;
                 const auto result = rollover_step ? controller_->step_rollover(state, now) :
                     controller_->set_mode(requested_mode, state, now, request->mode == "passive");

@@ -22,6 +22,8 @@ using Quaternion = std::array<float, 4>;
 
 constexpr float kSkillControlDt = 0.02F;
 constexpr std::uint64_t kForwardJumpFrames = 120U;
+constexpr std::uint64_t kDanceReferenceFrames = 1001U;
+constexpr std::uint64_t kDanceFrames = 1100U;
 
 constexpr float kSitEndSeconds = 2.0F;
 constexpr float kSitRecoverySeconds = 3.4F;
@@ -73,7 +75,8 @@ class PolicyAdapter {
 public:
     PolicyAdapter(const std::string& yaml_path, const std::string& model_directory);
     std::vector<float> build_observation(const RobotState&, VelocityCommand, const Action& previous, Mode mode,
-        float reference_time = 0.0F, const std::vector<Joints>& sit_trajectory = {}) const;
+        float reference_time = 0.0F, const std::vector<Joints>& sit_trajectory = {},
+        std::uint64_t policy_frame = 0) const;
     std::vector<float> build_sit_observation(const std::vector<Joints>& trajectory, const RobotState&, const Action&,
         float time, float stand_start = std::numeric_limits<float>::infinity()) const;
     Joints sit_hardware_targets(const std::vector<Joints>& trajectory, const Action&, float time,
@@ -83,6 +86,7 @@ public:
         const Quaternion& right_yaw_alignment = {1, 0, 0, 0}) const;
     Joints action_to_hardware_targets(const Action&, Mode mode, float reference_time = 0.0F,
         const std::vector<Joints>& sit_trajectory = {}, std::size_t variant_index = 0) const;
+    const MotionReference& dance_reference(std::uint64_t frame) const;
     GainSet policy_gains(Mode mode, std::size_t variant_index = 0) const;
     const std::array<std::size_t, kNumJoints>& policy_to_hardware(Mode mode) const;
     const ModelSpec& spec_for(Mode mode) const;
@@ -102,6 +106,7 @@ private:
     std::vector<float> observation_frame(Mode, const RobotState&, VelocityCommand, const Action&, const ModelSpec&,
         const std::unordered_map<std::string, std::vector<float>>& custom = {}) const;
     std::map<Mode, std::vector<ModelSpec>> models_;
+    std::vector<MotionReference> dance_reference_;
     mutable std::mutex execution_mutex_;
     mutable std::map<Mode, std::unique_ptr<rl_policy::PolicyExecutor>> executors_;
 };

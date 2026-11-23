@@ -355,6 +355,52 @@ void check_invalid_config(const YAML::Node &original, const fs::path &models, co
     }
 }
 
+void dance_policy_check(const std::string &models) {
+    using go2::Mode;
+    go2::Policy policy(models);
+    assert(policy.has_model(Mode::kDance));
+    std::ifstream golden(fs::path(GO2_TEST_APP) / "test/data/dance_golden.txt");
+    assert(golden);
+    unsigned frame = 0, count = 0;
+    go2::Quaternion alignment{1, 0, 0, 0};
+    float max_error = 0;
+    while (golden >> frame) {
+        auto state = fresh(1);
+        go2::Action previous{}, expected_action{}, expected_target{};
+        std::array<float, 69> expected_observation{};
+        for (auto &value : state.imu.six_axis_quaternion) golden >> value;
+        for (auto &value : state.imu.angular_velocity) golden >> value;
+        for (auto &joint : state.motors.joints) golden >> joint.feedback.position_rad;
+        for (auto &joint : state.motors.joints) golden >> joint.feedback.velocity_rad_s;
+        for (auto &value : previous) golden >> value;
+        for (auto &value : expected_observation) golden >> value;
+        for (auto &value : expected_action) golden >> value;
+        for (auto &value : expected_target) golden >> value;
+        assert(golden);
+        if (frame == 0) {
+            policy.reset_mode(Mode::kDance, &state);
+            alignment = go2::motion_yaw_alignment(
+                state.imu.six_axis_quaternion, test_adapter().dance_reference(0).quaternion);
+        }
+        const auto &reference = test_adapter().dance_reference(frame);
+        const auto observed = test_adapter().build_motion_observation(Mode::kDance, state,
+            reference.position, frame >= 1000U ? go2::Joints{} : reference.velocity,
+            reference.quaternion, previous, alignment);
+        for (unsigned i = 0; i < observed.size(); ++i) near(observed[i], expected_observation[i], 2e-5F);
+        const auto placeholder = test_adapter().build_observation(state, {}, previous, Mode::kDance);
+        const auto action = policy.infer(Mode::kDance, placeholder, &state, frame);
+        const auto target = test_adapter().action_to_hardware_targets(action, Mode::kDance, frame * .02F);
+        for (unsigned i = 0; i < 12; ++i) {
+            max_error = std::max(max_error, std::fabs(action[i] - expected_action[i]));
+            near(action[i], expected_action[i], 3e-4F);
+            near(target[i], expected_target[i], 1e-4F);
+        }
+        ++count;
+    }
+    assert(golden.eof() && count == 37U);
+    std::cout << "dance TorchScript golden samples=" << count << " max_error=" << max_error << '\n';
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -381,5 +427,18 @@ int main(int argc, char **argv) {
     check_config_overrides(original, models, temp);
     check_invalid_config(original, models, temp);
     check_policy_contracts(models.string());
+    if (fs::is_regular_file(models / "go2_rollover.onnx")) {
+        go2::Policy policy(models.string(), source.string());
+        const auto adapter = go2::PolicyAdapter(source.string(), models.string());
+        auto supine = fresh(1);
+        supine.imu.quaternion = {0.F, 1.F, 0.F, 0.F};
+        const auto frame = adapter.build_observation(supine, {}, {}, go2::Mode::kRollover);
+        assert(frame.size() == 43U);
+        near(frame[2], 1.F);
+        for (const float value : policy.infer(go2::Mode::kRollover, frame))
+            assert(std::isfinite(value));
+    }
+    if (fs::is_regular_file(models / "go2_dance.onnx"))
+        dance_policy_check(models.string());
     std::cout << "PASS: model contracts, mappings, ONNX episodes, YAML overrides and invalid inputs\n";
 }
