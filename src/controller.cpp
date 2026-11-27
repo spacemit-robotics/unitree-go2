@@ -650,7 +650,18 @@ ModeResult Controller::set_mode(Mode next, const RobotState &s, TimePoint now, b
         reason_ = "sit recovery before " + std::string(mode_name(next));
         return {true, reason_};
     }
-    if ((mode_ == Mode::kForwardJump || mode_ == Mode::kDance) && next != mode_) {
+    if (mode_ == Mode::kDance && next != mode_) {
+        enter(Mode::kStand, s, now);
+        velocity_ = {};
+        velocity_at_ = {};
+        if (passive_after_exit_)
+            pending_mode_ = Mode::kPassive;
+        else if (next != Mode::kStand)
+            pending_mode_ = next;
+        reason_ = pending_mode_ ? "FixStand before " + std::string(mode_name(*pending_mode_)) : "dance stopped; FixStand";
+        return {true, reason_};
+    }
+    if (mode_ == Mode::kForwardJump && next != mode_) {
         pending_mode_ = next;
         reason_ = "finishing motion before " + std::string(mode_name(next));
         return {true, reason_};
@@ -828,6 +839,9 @@ std::optional<Commands> Controller::advance_stand_transition(const RobotState &s
         const Joints final_fixstand_target =
             action_entry_target(*config_.policy_adapter, next, config_.sit_reference);
         const auto final_fixstand = pose_commands(*config_.policy_adapter, final_fixstand_target, false);
+        // A graceful passive request goes through the existing protective crouch.
+        if (next == Mode::kPassive)
+            return remember(final_fixstand);
         enter(next, s, now);
         return remember(final_fixstand);
     }
